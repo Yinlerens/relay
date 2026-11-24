@@ -1,0 +1,89 @@
+name: Build Unsigned IPA for SideStore
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-ios-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Archive Relay (unsigned)
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select newest Xcode (prefer Xcode 26 for Liquid Glass)
+        run: |
+          set -euo pipefail
+          NEWEST=$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -E 'Xcode_[0-9]+(\.[0-9]+)*\.app$' | sort -V | tail -n 1 || true)
+          if [ -n "${NEWEST}" ]; then
+            echo "Selecting ${NEWEST}"
+            sudo xcode-select -s "${NEWEST}/Contents/Developer"
+          fi
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: |
+          set -euo pipefail
+          cd ios
+          xcodegen generate
+          ls -la
+
+      - name: Archive (no code signing)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          mkdir -p build
+          xcodebuild archive \
+            -project Relay.xcodeproj \
+            -scheme Relay \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -archivePath "$PWD/build/Relay.xcarchive" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" \
+            | tee build/xcodebuild.log
+
+      - name: Package Relay-unsigned.ipa
+        run: |
+          set -euo pipefail
+          cd ios
+          APP_PATH="build/Relay.xcarchive/Products/Applications/Relay.app"
+          if [ ! -d "${APP_PATH}" ]; then
+            echo "::error::Relay.app not found in archive"
+            find build -maxdepth 5 -name "*.app" -print
+            exit 1
+          fi
+          rm -rf build/Payload
+          mkdir -p build/Payload
+          cp -R "${APP_PATH}" build/Payload/
+          cd build
+          /usr/bin/zip -qry Relay-unsigned.ipa Payload
+          ls -lh Relay-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Relay-unsigned-ipa
+          path: ios/build/Relay-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30

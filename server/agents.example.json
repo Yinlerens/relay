@@ -1,0 +1,28 @@
+[
+  {
+    "id": "agy",
+    "name": "Antigravity",
+    "subtitle": "Gemini & Claude",
+    "icon": "sparkles",
+    "accent": "indigo",
+    "command": "/home/ubuntu/.local/bin/agy",
+    "args": [
+      "acp",
+      "--disable-telemetry",
+      "--dangerously-skip-permissions"
+    ]
+  },
+  {
+    "id": "codebuddy",
+    "name": "CodeBuddy",
+    "subtitle": "WorkBuddy 共享积分",
+    "icon": "cpu",
+    "accent": "emerald",
+    "command": "/home/ubuntu/.local/bin/codebuddy",
+    "args": [
+      "--acp",
+      "--permission-mode",
+      "bypassPermissions"
+    ]
+  }
+]

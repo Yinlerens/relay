@@ -1,0 +1,15 @@
+node_modules/
+dist/
+server/dist/
+server/data/
+*.db
+*.db-wal
+*.db-shm
+.env
+*.xcodeproj/
+ios/build/
+build/
+*.ipa
+*.xcarchive/
+.DS_Store
+Thumbs.db
