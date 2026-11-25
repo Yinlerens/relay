@@ -63,6 +63,7 @@ export interface TavernMessage {
   blocks: TavernRenderBlock[];
   renderedHash: string;
   isStreaming: boolean;
+  mvuData?: Record<string, unknown> | null;
 }
 
 export interface TavernChatState {
@@ -72,6 +73,13 @@ export interface TavernChatState {
   userName: string;
   messages: TavernMessage[];
   variables: Record<string, unknown>;
+  totalMessageCount?: number;
+  hasMore?: boolean;
+}
+
+export interface TavernCurrentOptions {
+  limit?: number;
+  beforeMesId?: number;
 }
 
 export type TavernSwipeDirection = "left" | "right" | "new";
@@ -87,7 +95,7 @@ export interface TavernBridgeLike {
     chatFile?: string;
     createNew?: boolean;
   }): Promise<{ state: TavernChatState }>;
-  getCurrentState(): Promise<{ state: TavernChatState }>;
+  getCurrentState(options?: TavernCurrentOptions): Promise<{ state: TavernChatState }>;
   sendMessage(text: string): Promise<{ ok: true; state: TavernChatState }>;
   stopGeneration(): Promise<{ stopped: boolean }>;
   regenerate(): Promise<{ ok: true }>;

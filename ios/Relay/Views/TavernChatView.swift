@@ -19,6 +19,14 @@ enum TavernTextSplitter {
         pattern: "<(think|thought|thinking)>([\\s\\S]*)$",
         options: [.caseInsensitive]
     )
+    private static let hiddenBlockRegexes: [NSRegularExpression] = [
+        "<UpdateVariable>[\\s\\S]*?</UpdateVariable>",
+        "<UpdateVariable>[\\s\\S]*$",
+        "<StatusPlaceHolderImpl[^>]*>[\\s\\S]*?</StatusPlaceHolderImpl>",
+        "<StatusPlaceHolderImpl\\s*/?>",
+        "<comment>[\\s\\S]*?</comment>",
+        "<comment>[\\s\\S]*$",
+    ].compactMap { try? NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
 
     static func split(rawText: String, explicitReasoning: String, isStreaming: Bool) -> (reasoning: String, visible: String) {
         var reasoningParts: [String] = []
@@ -60,6 +68,16 @@ enum TavernTextSplitter {
                 }
                 working = ns.substring(to: match.range.location)
             }
+        }
+
+        for regex in hiddenBlockRegexes {
+            let ns = working as NSString
+            working = regex.stringByReplacingMatches(
+                in: working,
+                options: [],
+                range: NSRange(location: 0, length: ns.length),
+                withTemplate: ""
+            )
         }
 
         return (
@@ -141,6 +159,10 @@ struct TavernChatView: View {
                             .padding(.top, 54)
                     }
 
+                    if state?.hasMore == true && !messages.isEmpty {
+                        loadOlderButton
+                    }
+
                     ForEach(messages) { message in
                         TavernMessageRow(
                             message: message,
@@ -163,6 +185,11 @@ struct TavernChatView: View {
                             },
                             onSendFromCard: { text in
                                 Task { await store.sendTavernMessage(text: text) }
+                            },
+                            onFillDraft: { text in
+                                draft = text
+                                Haptics.selection()
+                                composerFocused = true
                             }
                         )
                         .id(message.mesId)
@@ -204,11 +231,11 @@ struct TavernChatView: View {
                     }
                 }
             }
-            .onChange(of: messages.count) { oldCount, newCount in
-                guard newCount > oldCount else { return }
-                if oldCount == 0 {
+            .onChange(of: messages.last?.mesId) { oldLast, newLast in
+                guard let newLast else { return }
+                if oldLast == nil {
                     proxy.scrollTo(bottomID, anchor: .bottom)
-                } else {
+                } else if let oldLast, newLast > oldLast {
                     withAnimation(.spring(response: 0.45, dampingFraction: 0.9)) {
                         proxy.scrollTo(bottomID, anchor: .bottom)
                     }
@@ -362,6 +389,37 @@ struct TavernChatView: View {
         return last.rawText.utf8.count &+ last.reasoning.utf8.count &* 31 &+ last.renderedHash.hashValue
     }
 
+    private var loadOlderButton: some View {
+        let total = state?.totalMessageCount ?? 0
+        let label = total > 0 ? "加载更早消息（共 \(total) 楼）" : "加载更早消息"
+        return HStack {
+            Spacer()
+            Button {
+                Haptics.tap(.soft)
+                Task { await store.loadOlderTavernMessages() }
+            } label: {
+                HStack(spacing: 7) {
+                    if store.isLoadingOlderTavernMessages {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: "arrow.up.circle")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                    Text(store.isLoadingOlderTavernMessages ? "正在加载…" : label)
+                        .font(.system(size: 12.5, weight: .semibold))
+                }
+                .foregroundStyle(TavernTheme.tint)
+                .padding(.horizontal, 14)
+                .frame(height: 34)
+                .glassCapsule(interactive: true, tint: TavernTheme.glow)
+            }
+            .buttonStyle(.pressable)
+            .disabled(store.isLoadingOlderTavernMessages)
+            Spacer()
+        }
+        .padding(.bottom, 4)
+    }
+
     // MARK: Empty state
 
     private var emptyChatView: some View {
@@ -481,6 +539,7 @@ struct TavernMessageRow: View {
     var onContinue: () -> Void
     var onSlash: (String) -> Void
     var onSendFromCard: (String) -> Void
+    var onFillDraft: (String) -> Void
 
     @Environment(AppStore.self) private var store
     @State private var copied = false
@@ -681,9 +740,11 @@ struct TavernMessageRow: View {
                     html: html,
                     estimatedHeight: block.estimatedHeight,
                     variablesJSON: variablesJSON,
+                    mvuDataJSON: message.mvuDataJSON,
                     isIframe: block.kind == "iframe",
                     onSlash: onSlash,
-                    onSend: onSendFromCard
+                    onSend: onSendFromCard,
+                    onFillDraft: onFillDraft
                 )
             }
 

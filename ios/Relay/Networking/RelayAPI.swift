@@ -359,8 +359,18 @@ struct RelayAPI: Sendable {
         return try await send(request, as: TavernStateResponse.self)
     }
 
-    func tavernCurrent() async throws -> TavernStateResponse {
-        try await json("/api/tavern/current", as: TavernStateResponse.self)
+    func tavernCurrent(limit: Int? = nil, before: Int? = nil) async throws -> TavernStateResponse {
+        var request = authorizedRequest("/api/tavern/current")
+        var queryItems: [URLQueryItem] = []
+        if let limit { queryItems.append(URLQueryItem(name: "limit", value: String(limit))) }
+        if let before { queryItems.append(URLQueryItem(name: "before", value: String(before))) }
+        if !queryItems.isEmpty,
+           let base = request.url,
+           var comps = URLComponents(url: base, resolvingAgainstBaseURL: false) {
+            comps.queryItems = queryItems
+            request.url = comps.url ?? base
+        }
+        return try await send(request, as: TavernStateResponse.self)
     }
 
     func tavernSend(text: String) async throws -> TavernActionStateResponse {

@@ -75,6 +75,7 @@ final class AppStore {
     var tavernVariablesJSON: String = "{}"
     var isLoadingTavern = false
     var isLoadingTavernChat = false
+    var isLoadingOlderTavernMessages = false
     var isLoggingInTavern = false
     var isReloadingTavern = false
     var isMutatingTavern = false
@@ -605,6 +606,7 @@ final class AppStore {
         tavernVariablesJSON = "{}"
         isLoadingTavern = false
         isLoadingTavernChat = false
+        isLoadingOlderTavernMessages = false
         isLoggingInTavern = false
         isReloadingTavern = false
         isMutatingTavern = false
@@ -734,6 +736,44 @@ final class AppStore {
             if tavernState == nil {
                 showBanner("读取当前酒馆会话失败：\(error.localizedDescription)")
             }
+        }
+    }
+
+    func loadOlderTavernMessages() async {
+        guard let api,
+              !isLoadingOlderTavernMessages,
+              let current = tavernState,
+              current.hasMore == true,
+              let oldestMesId = current.messages.map(\.mesId).min(),
+              oldestMesId > 0 else { return }
+
+        let anchorCharacterId = current.character?.id
+        let anchorChatFile = current.chatFile
+        isLoadingOlderTavernMessages = true
+        defer { isLoadingOlderTavernMessages = false }
+
+        do {
+            let res = try await api.tavernCurrent(limit: 25, before: oldestMesId)
+            guard var latest = tavernState,
+                  latest.character?.id == anchorCharacterId,
+                  latest.chatFile == anchorChatFile else { return }
+
+            var byId: [Int: TavernMessage] = [:]
+            for m in res.state.messages {
+                byId[m.mesId] = m
+            }
+            for m in latest.messages {
+                byId[m.mesId] = m
+            }
+            latest.messages = byId.values.sorted { $0.mesId < $1.mesId }
+            latest.hasMore = res.state.hasMore
+            if let total = res.state.totalMessageCount {
+                latest.totalMessageCount = total
+            }
+            tavernState = latest
+            Haptics.selection()
+        } catch {
+            showBanner("加载更早消息失败：\(error.localizedDescription)")
         }
     }
 
@@ -1240,25 +1280,41 @@ final class AppStore {
         case "tavern_status":
             if let st = decodePayload(WSTavernStatusPayload.self, from: data)?.status {
                 tavernStatus = st
-                if tavernState != nil {
-                    tavernState?.status = st
+                if var current = tavernState {
+                    current.status = st
+                    if !st.isGenerating {
+                        for idx in current.messages.indices where current.messages[idx].isStreaming {
+                            current.messages[idx].isStreaming = false
+                        }
+                    }
+                    tavernState = current
                 }
             }
 
         case "tavern_stream_delta":
             guard let p = decodePayload(WSTavernStreamDeltaPayload.self, from: data) else { return }
-            tavernStatus?.isGenerating = true
-            guard var state = tavernState else { return }
+            guard var state = tavernState else {
+                tavernStatus?.isGenerating = true
+                return
+            }
             if let cid = p.characterId, let currentId = state.character?.id, cid != currentId { return }
             if let cf = p.chatFile, let currentCf = state.chatFile, !cf.isEmpty, !currentCf.isEmpty, cf != currentCf { return }
-            state.status.isGenerating = true
             if let idx = state.messages.lastIndex(where: { $0.mesId == p.mesId }) {
+                let existing = state.messages[idx]
+                // Never overwrite a finalized rendered message when a stale identical delta arrives.
+                if !existing.blocks.isEmpty && p.text == existing.rawText {
+                    return
+                }
+                tavernStatus?.isGenerating = true
+                state.status.isGenerating = true
                 state.messages[idx].rawText = p.text
                 if !p.reasoning.isEmpty {
                     state.messages[idx].reasoning = p.reasoning
                 }
                 state.messages[idx].isStreaming = true
             } else {
+                tavernStatus?.isGenerating = true
+                state.status.isGenerating = true
                 let placeholder = TavernMessage(
                     mesId: p.mesId,
                     name: state.character?.name ?? "角色",

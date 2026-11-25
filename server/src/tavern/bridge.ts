@@ -5,8 +5,8 @@ import type { RelayDatabase } from "../db.js";
 import { sendBarkNotification } from "../utils/bark.js";
 import { TavernAuthStore } from "./auth-store.js";
 import {
+  buildExtractChatMessagesScript,
   buildTavernAvatarUrl,
-  EXTRACT_CHAT_MESSAGES_PAGE_SCRIPT,
   finalizeExtractedMessages,
   type RawExtractedMessage,
 } from "./dom-extractor.js";
@@ -15,6 +15,7 @@ import type {
   TavernCharacter,
   TavernChatFile,
   TavernChatState,
+  TavernCurrentOptions,
   TavernLoginUser,
   TavernMessage,
   TavernStatus,
@@ -96,8 +97,11 @@ export class TavernBridge implements TavernBridgeLike {
   private deltaThrottleTimer: NodeJS.Timeout | null = null;
   private finalizeTimer: NodeJS.Timeout | null = null;
   private delayedCheckTimer: NodeJS.Timeout | null = null;
+  private renderRefreshTimer: NodeJS.Timeout | null = null;
   private lastDeltaEmitAt = 0;
   private lastDeltaKey = "";
+  private generationStartedAt = 0;
+  private sawLiveGenerating = false;
 
   constructor(
     private readonly config: AppConfig,
@@ -193,6 +197,8 @@ export class TavernBridge implements TavernBridgeLike {
           this.page = null;
           this.ready = false;
           this.isGenerating = false;
+          this.sawLiveGenerating = false;
+          this.generationStartedAt = 0;
           this.stopStreamPolling();
           this.clearFinalizationTimers();
           if (!this.disposed) {
@@ -405,6 +411,19 @@ export class TavernBridge implements TavernBridgeLike {
       window.__relayTavernBound = true;
       const es = ctx.eventSource;
       const et = ctx.eventTypes || ctx.event_types || {};
+      const isLiveGen = () => {
+        const stopEl = document.querySelector("#mes_stop");
+        let stopVisible = false;
+        if (stopEl) {
+          const style = window.getComputedStyle(stopEl);
+          stopVisible = style.display !== "none" && style.visibility !== "hidden";
+        }
+        return Boolean(
+          stopVisible ||
+          ctx.streamingProcessor ||
+          document.body?.dataset?.generating === "true"
+        );
+      };
       const emit = (name, payload) => {
         if (typeof window.__relayTavernEvent === "function") {
           window.__relayTavernEvent(name, payload);
@@ -415,7 +434,10 @@ export class TavernBridge implements TavernBridgeLike {
         if (evName && typeof es.on === "function") {
           es.on(evName, (data) => {
             try {
-              emit(tag, typeof data === "string" || typeof data === "number" ? data : null);
+              emit(tag, {
+                value: typeof data === "string" || typeof data === "number" ? data : null,
+                isLiveGenerating: isLiveGen(),
+              });
             } catch {}
           });
         }
@@ -424,6 +446,8 @@ export class TavernBridge implements TavernBridgeLike {
       bind("STREAM_TOKEN_RECEIVED", "stream_token_received", "STREAM_TOKEN_RECEIVED");
       bind("GENERATION_ENDED", "generation_ended", "GENERATION_ENDED");
       bind("GENERATION_STOPPED", "generation_stopped", "GENERATION_STOPPED");
+      bind("MESSAGE_RECEIVED", "message_received", "MESSAGE_RECEIVED");
+      bind("CHARACTER_MESSAGE_RENDERED", "character_message_rendered", "CHARACTER_MESSAGE_RENDERED");
       bind("MESSAGE_SWIPED", "message_swiped", "MESSAGE_SWIPED");
       bind("CHAT_CHANGED", "chat_changed", "CHAT_CHANGED");
     })()`);
@@ -437,35 +461,90 @@ export class TavernBridge implements TavernBridgeLike {
         characterId: number | null;
         characterName: string | null;
         chatFile: string | null;
+        isLiveGenerating: boolean;
       }>(`(() => {
         const st = window.SillyTavern;
         const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
-        if (!ctx) return { characterId: null, characterName: null, chatFile: null };
+        if (!ctx) return { characterId: null, characterName: null, chatFile: null, isLiveGenerating: false };
         const rawId = ctx.characterId;
         const idNum = rawId !== undefined && rawId !== null && rawId !== "" ? Number(rawId) : NaN;
         const ch = Number.isFinite(idNum) && Array.isArray(ctx.characters) ? ctx.characters[idNum] : null;
         const chatId = typeof ctx.getCurrentChatId === "function" ? ctx.getCurrentChatId() : ctx.chatId;
+        const stopEl = document.querySelector("#mes_stop");
+        let stopVisible = false;
+        if (stopEl) {
+          const style = window.getComputedStyle(stopEl);
+          stopVisible = style.display !== "none" && style.visibility !== "hidden";
+        }
+        const isLiveGenerating = Boolean(
+          stopVisible ||
+          ctx.streamingProcessor ||
+          document.body?.dataset?.generating === "true"
+        );
         return {
           characterId: ch ? idNum : null,
           characterName: ch ? String(ch.name || "") : null,
           chatFile: chatId ? String(chatId) : (ch && ch.chat ? String(ch.chat) : null),
+          isLiveGenerating,
         };
       })()`);
       this.currentCharacterId = meta.characterId;
       this.currentCharacterName = meta.characterName;
       this.currentChatFile = meta.chatFile;
+      this.reconcileLiveGenerating(meta.isLiveGenerating);
     } catch {
       // ignore transient eval error
     }
   }
 
-  private handlePageEvent(eventName: string, _payload: unknown): void {
+  private reconcileLiveGenerating(isLiveGenerating: boolean): void {
+    if (isLiveGenerating) {
+      this.sawLiveGenerating = true;
+      return;
+    }
+    if (!this.isGenerating) return;
+    const stale =
+      this.sawLiveGenerating ||
+      this.generationStartedAt === 0 ||
+      Date.now() - this.generationStartedAt > 8_000;
+    if (stale) {
+      this.isGenerating = false;
+      this.sawLiveGenerating = false;
+      this.generationStartedAt = 0;
+      this.stopStreamPolling();
+    }
+  }
+
+  private scheduleRenderRefresh(): void {
+    if (this.renderRefreshTimer) {
+      clearTimeout(this.renderRefreshTimer);
+    }
+    this.renderRefreshTimer = setTimeout(() => {
+      this.renderRefreshTimer = null;
+      if (!this.disposed && !this.isGenerating && this.ready) {
+        void this.extractChatState()
+          .then((state) => {
+            this.sessionManager.emitExternal("tavern_chat_updated", "tavern", { state });
+          })
+          .catch(() => {});
+      }
+    }, 350);
+    this.renderRefreshTimer.unref();
+  }
+
+  private handlePageEvent(eventName: string, payload: unknown): void {
     if (this.disposed) return;
+    const payloadObj =
+      payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
+    const payloadLiveGen =
+      typeof payloadObj?.isLiveGenerating === "boolean" ? payloadObj.isLiveGenerating : undefined;
 
     switch (eventName) {
       case "GENERATION_STARTED": {
         this.clearFinalizationTimers();
         this.isGenerating = true;
+        this.generationStartedAt = Date.now();
+        this.sawLiveGenerating = Boolean(payloadLiveGen);
         this.lastDeltaKey = "";
         this.emitStatus();
         this.startStreamPolling();
@@ -475,8 +554,12 @@ export class TavernBridge implements TavernBridgeLike {
       case "STREAM_TOKEN_RECEIVED": {
         if (!this.isGenerating) {
           this.isGenerating = true;
+          this.generationStartedAt = Date.now();
+          this.sawLiveGenerating = true;
           this.emitStatus();
           this.startStreamPolling();
+        } else {
+          this.sawLiveGenerating = true;
         }
         this.scheduleDeltaEmit();
         break;
@@ -489,18 +572,21 @@ export class TavernBridge implements TavernBridgeLike {
         break;
       }
 
+      case "MESSAGE_RECEIVED":
+      case "CHARACTER_MESSAGE_RENDERED": {
+        if (payloadLiveGen === false && this.isGenerating) {
+          this.stopStreamPolling();
+          this.scheduleFinalization(true);
+        } else if (!this.isGenerating && payloadLiveGen !== true) {
+          this.scheduleRenderRefresh();
+        }
+        break;
+      }
+
       case "MESSAGE_SWIPED":
       case "CHAT_CHANGED": {
         if (!this.isGenerating) {
-          setTimeout(() => {
-            if (!this.disposed && !this.isGenerating && this.ready) {
-              void this.extractChatState()
-                .then((state) => {
-                  this.sessionManager.emitExternal("tavern_chat_updated", "tavern", { state });
-                })
-                .catch(() => {});
-            }
-          }, 220).unref();
+          this.scheduleRenderRefresh();
         }
         break;
       }
@@ -539,6 +625,10 @@ export class TavernBridge implements TavernBridgeLike {
       clearTimeout(this.delayedCheckTimer);
       this.delayedCheckTimer = null;
     }
+    if (this.renderRefreshTimer) {
+      clearTimeout(this.renderRefreshTimer);
+      this.renderRefreshTimer = null;
+    }
   }
 
   private scheduleDeltaEmit(): void {
@@ -564,17 +654,34 @@ export class TavernBridge implements TavernBridgeLike {
     if (!page || page.isClosed() || !this.ready || !this.isGenerating) return;
     try {
       const snap = await page.evaluate<{
-        mesId: number;
+        isLiveGenerating: boolean;
+        mesId: number | null;
         text: string;
         reasoning: string;
       } | null>(`(() => {
         const st = window.SillyTavern;
         const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
-        if (!ctx || !Array.isArray(ctx.chat) || ctx.chat.length === 0) return null;
+        if (!ctx || !Array.isArray(ctx.chat)) return null;
+        const stopEl = document.querySelector("#mes_stop");
+        let stopVisible = false;
+        if (stopEl) {
+          const style = window.getComputedStyle(stopEl);
+          stopVisible = style.display !== "none" && style.visibility !== "hidden";
+        }
+        const isLiveGenerating = Boolean(
+          stopVisible ||
+          ctx.streamingProcessor ||
+          document.body?.dataset?.generating === "true"
+        );
+        if (ctx.chat.length === 0) {
+          return { isLiveGenerating, mesId: null, text: "", reasoning: "" };
+        }
         const sp = ctx.streamingProcessor;
         const mesId = sp && typeof sp.messageId === "number" ? sp.messageId : ctx.chat.length - 1;
         const m = ctx.chat[mesId];
-        if (!m || m.is_user) return null;
+        if (!m || m.is_user) {
+          return { isLiveGenerating, mesId: null, text: "", reasoning: "" };
+        }
         const mesEl = document.querySelector('.mes[mesid="' + mesId + '"]');
         const domReasoning = mesEl ? (mesEl.querySelector(".mes_reasoning")?.textContent || "") : "";
         const text =
@@ -584,10 +691,25 @@ export class TavernBridge implements TavernBridgeLike {
           (sp && typeof sp.reasoning === "string" && sp.reasoning) ||
           (m.extra && typeof m.extra.reasoning === "string" ? m.extra.reasoning : "") ||
           domReasoning;
-        return { mesId, text, reasoning };
+        return { isLiveGenerating, mesId, text, reasoning };
       })()`);
 
       if (!snap) return;
+
+      if (!snap.isLiveGenerating) {
+        const timedOut =
+          this.generationStartedAt > 0 && Date.now() - this.generationStartedAt > 8_000;
+        if (this.sawLiveGenerating || timedOut) {
+          const shouldNotify = this.sawLiveGenerating;
+          this.stopStreamPolling();
+          this.scheduleFinalization(shouldNotify);
+        }
+        return;
+      }
+
+      this.sawLiveGenerating = true;
+      if (snap.mesId === null) return;
+
       const key = `${snap.mesId}:${snap.text.length}:${snap.reasoning.length}:${snap.text.slice(-32)}`;
       if (key === this.lastDeltaKey) return;
       this.lastDeltaKey = key;
@@ -617,6 +739,8 @@ export class TavernBridge implements TavernBridgeLike {
   private async runFinalization(notifyBark: boolean): Promise<void> {
     if (this.disposed || !this.ready) return;
     this.isGenerating = false;
+    this.sawLiveGenerating = false;
+    this.generationStartedAt = 0;
     try {
       const state = await this.extractChatState();
       const lastMsg = state.messages[state.messages.length - 1] ?? null;
@@ -744,17 +868,18 @@ export class TavernBridge implements TavernBridgeLike {
       .sort((a, b) => b.lastChatAt - a.lastChatAt || a.name.localeCompare(b.name));
   }
 
-  private async extractChatState(): Promise<TavernChatState> {
+  private async extractChatState(options?: TavernCurrentOptions): Promise<TavernChatState> {
     await this.syncCurrentSelectionMeta();
-    const status = this.buildStatus();
     if (!this.ready || !this.page || this.page.isClosed()) {
       return {
-        status,
+        status: this.buildStatus(),
         character: null,
         chatFile: null,
         userName: "User",
         messages: [],
         variables: {},
+        totalMessageCount: 0,
+        hasMore: false,
       };
     }
 
@@ -768,16 +893,27 @@ export class TavernBridge implements TavernBridgeLike {
       userName: string;
       messages: RawExtractedMessage[];
       variables: Record<string, unknown>;
-    }>(EXTRACT_CHAT_MESSAGES_PAGE_SCRIPT);
+      totalMessageCount: number;
+      hasMore: boolean;
+      isLiveGenerating: boolean;
+    }>(
+      buildExtractChatMessagesScript({
+        limit: options?.limit ?? 25,
+        beforeMesId: options?.beforeMesId,
+      })
+    );
 
+    this.reconcileLiveGenerating(Boolean(extracted.isLiveGenerating));
     const messages = finalizeExtractedMessages(extracted.messages || []);
     return {
-      status,
+      status: this.buildStatus(),
       character,
       chatFile: this.currentChatFile,
       userName: extracted.userName || "User",
       messages,
       variables: extracted.variables || {},
+      totalMessageCount: extracted.totalMessageCount ?? messages.length,
+      hasMore: Boolean(extracted.hasMore),
     };
   }
 
@@ -948,7 +1084,7 @@ export class TavernBridge implements TavernBridgeLike {
     });
   }
 
-  async getCurrentState(): Promise<{ state: TavernChatState }> {
+  async getCurrentState(options?: TavernCurrentOptions): Promise<{ state: TavernChatState }> {
     if (!this.config.tavernEnabled) {
       return {
         state: {
@@ -958,11 +1094,13 @@ export class TavernBridge implements TavernBridgeLike {
           userName: "User",
           messages: [],
           variables: {},
+          totalMessageCount: 0,
+          hasMore: false,
         },
       };
     }
     await this.ensureInitialized();
-    const state = await this.extractChatState();
+    const state = await this.extractChatState(options);
     return { state };
   }
 
@@ -1022,6 +1160,8 @@ export class TavernBridge implements TavernBridgeLike {
     if (stopped || wasGenerating) {
       this.stopStreamPolling();
       this.isGenerating = false;
+      this.sawLiveGenerating = false;
+      this.generationStartedAt = 0;
       this.emitStatus();
     }
     return { stopped: Boolean(stopped || wasGenerating) };

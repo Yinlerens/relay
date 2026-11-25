@@ -285,12 +285,13 @@ struct TavernMessage: Codable, Identifiable, Hashable, Sendable {
     var blocks: [TavernRenderBlock]
     var renderedHash: String
     var isStreaming: Bool
+    var mvuData: [String: JSONAnyValue]?
 
     var id: Int { mesId }
 
     enum CodingKeys: String, CodingKey {
         case mesId, name, avatarUrl, isUser, isSystem, sendDate
-        case rawText, reasoning, swipeId, swipeCount, blocks, renderedHash, isStreaming
+        case rawText, reasoning, swipeId, swipeCount, blocks, renderedHash, isStreaming, mvuData
     }
 
     init(
@@ -306,7 +307,8 @@ struct TavernMessage: Codable, Identifiable, Hashable, Sendable {
         swipeCount: Int = 1,
         blocks: [TavernRenderBlock] = [],
         renderedHash: String = "",
-        isStreaming: Bool = false
+        isStreaming: Bool = false,
+        mvuData: [String: JSONAnyValue]? = nil
     ) {
         self.mesId = mesId
         self.name = name
@@ -321,6 +323,7 @@ struct TavernMessage: Codable, Identifiable, Hashable, Sendable {
         self.blocks = blocks
         self.renderedHash = renderedHash
         self.isStreaming = isStreaming
+        self.mvuData = mvuData
     }
 
     init(from decoder: Decoder) throws {
@@ -338,6 +341,12 @@ struct TavernMessage: Codable, Identifiable, Hashable, Sendable {
         blocks = c.flexArray(TavernRenderBlock.self, .blocks)
         renderedHash = c.flexString(.renderedHash)
         isStreaming = c.flexBool(.isStreaming)
+        mvuData = try? c.decodeIfPresent([String: JSONAnyValue].self, forKey: .mvuData)
+    }
+
+    var mvuDataJSON: String {
+        guard let mvuData, !mvuData.isEmpty else { return "{}" }
+        return JSONAnyValue.encodeVariablesJSON(mvuData)
     }
 }
 
@@ -348,9 +357,11 @@ struct TavernChatState: Codable, Hashable, Sendable {
     var userName: String
     var messages: [TavernMessage]
     var variables: [String: JSONAnyValue]
+    var totalMessageCount: Int?
+    var hasMore: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case status, character, chatFile, userName, messages, variables
+        case status, character, chatFile, userName, messages, variables, totalMessageCount, hasMore
     }
 
     init(from decoder: Decoder) throws {
@@ -361,6 +372,8 @@ struct TavernChatState: Codable, Hashable, Sendable {
         userName = c.flexString(.userName, default: "You")
         messages = c.flexArray(TavernMessage.self, .messages)
         variables = (try? c.decodeIfPresent([String: JSONAnyValue].self, forKey: .variables)) ?? [:]
+        totalMessageCount = c.flexOptionalInt(.totalMessageCount)
+        hasMore = try? c.decodeIfPresent(Bool.self, forKey: .hasMore)
     }
 
     var variablesJSON: String {

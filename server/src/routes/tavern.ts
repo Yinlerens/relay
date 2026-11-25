@@ -87,9 +87,20 @@ export function registerTavernRoutes(
     });
   });
 
-  app.get("/api/tavern/current", async () => {
-    return bridge.getCurrentState();
-  });
+  app.get<{ Querystring: { limit?: string; before?: string } }>(
+    "/api/tavern/current",
+    async (req) => {
+      const rawLimit = req.query?.limit ? Number.parseInt(req.query.limit, 10) : NaN;
+      const rawBefore = req.query?.before ? Number.parseInt(req.query.before, 10) : NaN;
+      const limit =
+        Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(200, Math.max(1, rawLimit)) : undefined;
+      const beforeMesId =
+        Number.isFinite(rawBefore) && rawBefore >= 0 ? rawBefore : undefined;
+      return bridge.getCurrentState(
+        limit !== undefined || beforeMesId !== undefined ? { limit, beforeMesId } : undefined
+      );
+    }
+  );
 
   app.post<{ Body: { text?: string } }>("/api/tavern/send", async (req, reply) => {
     const text = req.body?.text ?? "";
@@ -189,7 +200,13 @@ export function registerTavernRoutes(
       return reply.code(upstream.status).send({ error: `Upstream asset error (${upstream.status})` });
     }
 
-    const contentType = upstream.headers.get("content-type") || inferMimeType(safePath);
+    const cleanPath = safePath.split("?")[0].toLowerCase();
+    let contentType = upstream.headers.get("content-type") || inferMimeType(safePath);
+    if (cleanPath.endsWith(".js") || cleanPath.endsWith(".mjs")) {
+      contentType = "application/javascript; charset=utf-8";
+    } else if (cleanPath.endsWith(".css")) {
+      contentType = "text/css; charset=utf-8";
+    }
     const cacheSeconds = safePath.startsWith("/thumbnail") ? 300 : 3600;
     const buf = Buffer.from(await upstream.arrayBuffer());
 

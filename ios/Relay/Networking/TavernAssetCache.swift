@@ -310,9 +310,9 @@ final class TavernAssetSchemeHandler: NSObject, WKURLSchemeHandler {
                     guard let self, self.activeTasks.removeValue(forKey: key) != nil, !Task.isCancelled else {
                         return
                     }
-                    let cleanMime = Self.resolvedMime(serverMime: serverMime, rawURL: rawURL)
+                    let resolved = Self.resolvedMime(serverMime: serverMime, rawURL: rawURL)
                     let headers: [String: String] = [
-                        "Content-Type": cleanMime,
+                        "Content-Type": resolved.headerValue,
                         "Content-Length": "\(data.count)",
                         "Cache-Control": "private, max-age=3600",
                         "Access-Control-Allow-Origin": "*",
@@ -324,9 +324,9 @@ final class TavernAssetSchemeHandler: NSObject, WKURLSchemeHandler {
                         headerFields: headers
                     ) ?? URLResponse(
                         url: requestURL,
-                        mimeType: cleanMime,
+                        mimeType: resolved.mimeType,
                         expectedContentLength: data.count,
-                        textEncodingName: cleanMime.hasPrefix("text/") ? "utf-8" : nil
+                        textEncodingName: resolved.isUTF8 ? "utf-8" : nil
                     )
                     urlSchemeTask.didReceive(response)
                     urlSchemeTask.didReceive(data)
@@ -349,30 +349,46 @@ final class TavernAssetSchemeHandler: NSObject, WKURLSchemeHandler {
         activeTasks.removeValue(forKey: key)?.cancel()
     }
 
-    private static func resolvedMime(serverMime: String?, rawURL: String) -> String {
-        if let serverMime {
-            let trimmed = serverMime.split(separator: ";").first.map { String($0).trimmingCharacters(in: .whitespaces) } ?? ""
-            if !trimmed.isEmpty && trimmed != "application/octet-stream" {
-                return trimmed
-            }
-        }
+    private static func resolvedMime(serverMime: String?, rawURL: String) -> (mimeType: String, headerValue: String, isUTF8: Bool) {
         let target = URLComponents(string: rawURL)?.queryItems?.first(where: { $0.name == "path" })?.value ?? rawURL
         let pathOnly = target.split(separator: "?").first.map(String.init) ?? target
         let ext = (pathOnly as NSString).pathExtension.lowercased()
+
+        // Enforce strict web MIME types by extension so scripts/styles/SVGs/fonts execute cleanly in WKWebView.
         switch ext {
-        case "png": return "image/png"
-        case "jpg", "jpeg": return "image/jpeg"
-        case "webp": return "image/webp"
-        case "gif": return "image/gif"
-        case "svg": return "image/svg+xml"
-        case "css": return "text/css"
-        case "js", "mjs": return "application/javascript"
-        case "woff2": return "font/woff2"
-        case "woff": return "font/woff"
-        case "ttf": return "font/ttf"
-        case "mp3": return "audio/mpeg"
-        case "ogg": return "audio/ogg"
-        default: return "application/octet-stream"
+        case "js", "mjs":
+            return ("application/javascript", "application/javascript; charset=utf-8", true)
+        case "css":
+            return ("text/css", "text/css; charset=utf-8", true)
+        case "svg":
+            return ("image/svg+xml", "image/svg+xml", true)
+        case "woff2":
+            return ("font/woff2", "font/woff2", false)
+        case "woff":
+            return ("font/woff", "font/woff", false)
+        case "ttf":
+            return ("font/ttf", "font/ttf", false)
+        default:
+            break
+        }
+
+        if let serverMime {
+            let trimmed = serverMime.split(separator: ";").first.map { String($0).trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
+            if !trimmed.isEmpty && trimmed != "application/octet-stream" && trimmed != "text/plain" {
+                let utf8 = trimmed.hasPrefix("text/") || trimmed.contains("javascript") || trimmed.contains("json") || trimmed.contains("xml")
+                return (trimmed, utf8 ? "\(trimmed); charset=utf-8" : trimmed, utf8)
+            }
+        }
+
+        switch ext {
+        case "png": return ("image/png", "image/png", false)
+        case "jpg", "jpeg": return ("image/jpeg", "image/jpeg", false)
+        case "webp": return ("image/webp", "image/webp", false)
+        case "gif": return ("image/gif", "image/gif", false)
+        case "json": return ("application/json", "application/json; charset=utf-8", true)
+        case "mp3": return ("audio/mpeg", "audio/mpeg", false)
+        case "ogg": return ("audio/ogg", "audio/ogg", false)
+        default: return ("application/octet-stream", "application/octet-stream", false)
         }
     }
 }

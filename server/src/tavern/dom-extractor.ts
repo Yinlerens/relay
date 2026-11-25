@@ -98,7 +98,9 @@ export function buildTavernAssetProxyUrl(relativeStPath: string): string {
 
 export function buildTavernAvatarUrl(avatar: string | null | undefined): string {
   if (!avatar || !avatar.trim()) return "";
-  return buildTavernAssetProxyUrl(`/thumbnail?type=avatar&file=${encodeURIComponent(avatar.trim())}`);
+  return buildTavernAssetProxyUrl(
+    `/thumbnail?type=avatar&file=${encodeURIComponent(avatar.trim())}`
+  );
 }
 
 function toRelaySchemeAssetUrl(rawUrl: string): string | null {
@@ -111,9 +113,7 @@ function toRelaySchemeAssetUrl(rawUrl: string): string | null {
   ) {
     return null;
   }
-  const normalized = trimmed.startsWith("/")
-    ? trimmed
-    : `/${trimmed.replace(/^\.\//, "")}`;
+  const normalized = trimmed.startsWith("/") ? trimmed : `/${trimmed.replace(/^\.\//, "")}`;
   const safe = sanitizeStAssetPath(normalized);
   if (!safe) return null;
   return `relay-st://asset?path=${encodeURIComponent(safe)}`;
@@ -153,8 +153,35 @@ export function rewriteHtmlAssetUrls(html: string): string {
   return out;
 }
 
+/**
+ * Cleans an extracted iframe document HTML (e.g. from JS-Slash-Runner `TH-render`):
+ * removes dead `blob:` script tags (which cannot load outside the source Chromium origin),
+ * preserves `https://` and `/scripts/...` scripts, and rewrites all intra-ST relative URLs
+ * to `relay-st://asset?path=...`.
+ */
+export function cleanIframeDocumentHtml(html: string): string {
+  if (!html) return "";
+  const withoutBlobScripts = html.replace(
+    /<script\b[^>]*\bsrc\s*=\s*(?:"blob:[^"]*"|'blob:[^']*')[^>]*>[\s\S]*?<\/script>/gi,
+    ""
+  );
+  return rewriteHtmlAssetUrls(withoutBlobScripts);
+}
+
 export function computeRenderedHash(blocks: TavernRenderBlock[]): string {
   return crypto.createHash("sha1").update(JSON.stringify(blocks)).digest("hex").slice(0, 12);
+}
+
+/** Strip hidden SillyTavern MVU / helper XML control tags from fallback markdown text. */
+export function stripHiddenTavernXml(text: string): string {
+  if (!text) return "";
+  return text
+    .replace(/<UpdateVariable\b[^>]*>[\s\S]*?<\/UpdateVariable>/gi, "")
+    .replace(/<UpdateVariable\b[^>]*>[\s\S]*$/gi, "")
+    .replace(/<StatusPlaceHolderImpl\b[^>]*\/?>/gi, "")
+    .replace(/<comment\b[^>]*>[\s\S]*?<\/comment>/gi, "")
+    .replace(/<comment\b[^>]*>[\s\S]*$/gi, "")
+    .trim();
 }
 
 /** Extract `<think>...</think>` or `<thought>...</thought>` from raw text when reasoning isn't provided separately. */
@@ -189,6 +216,7 @@ export interface FallbackMessageInput {
   swipeId?: number;
   swipeCount?: number;
   isStreaming?: boolean;
+  mvuData?: Record<string, unknown> | null;
 }
 
 export function buildFallbackMarkdownMessage(input: FallbackMessageInput): TavernMessage {
@@ -201,9 +229,10 @@ export function buildFallbackMarkdownMessage(input: FallbackMessageInput): Taver
       body = split.cleanedText;
     }
   }
+  const visibleBody = stripHiddenTavernXml(body);
 
-  const blocks: TavernRenderBlock[] = body
-    ? [{ id: `m-${input.mesId}-0`, kind: "markdown", markdown: body }]
+  const blocks: TavernRenderBlock[] = visibleBody
+    ? [{ id: `m-${input.mesId}-0`, kind: "markdown", markdown: visibleBody }]
     : [];
 
   return {
@@ -220,6 +249,7 @@ export function buildFallbackMarkdownMessage(input: FallbackMessageInput): Taver
     blocks,
     renderedHash: computeRenderedHash(blocks),
     isStreaming: Boolean(input.isStreaming),
+    ...(input.mvuData !== undefined ? { mvuData: input.mvuData } : {}),
   };
 }
 
@@ -247,11 +277,14 @@ export interface RawExtractedMessage {
   hasDom: boolean;
   rawBlocks: RawExtractedBlock[];
   isStreaming: boolean;
+  mvuData?: Record<string, unknown> | null;
 }
 
 export function finalizeExtractedMessages(rawList: RawExtractedMessage[]): TavernMessage[] {
   return rawList.map((raw) => {
     const avatarUrl = raw.avatarPath ? buildTavernAssetProxyUrl(raw.avatarPath) || null : null;
+    const mvuData =
+      raw.mvuData && typeof raw.mvuData === "object" ? raw.mvuData : null;
 
     if (!raw.hasDom || raw.rawBlocks.length === 0) {
       return buildFallbackMarkdownMessage({
@@ -266,6 +299,7 @@ export function finalizeExtractedMessages(rawList: RawExtractedMessage[]): Taver
         swipeId: raw.swipeId,
         swipeCount: raw.swipeCount,
         isStreaming: raw.isStreaming,
+        mvuData,
       });
     }
 
@@ -277,7 +311,7 @@ export function finalizeExtractedMessages(rawList: RawExtractedMessage[]): Taver
         blocks.push({
           id,
           kind: "iframe",
-          html: rewriteHtmlAssetUrls(b.html || ""),
+          html: cleanIframeDocumentHtml(b.html || ""),
           ...(typeof b.estimatedHeight === "number" && b.estimatedHeight > 0
             ? { estimatedHeight: Math.round(b.estimatedHeight) }
             : {}),
@@ -334,6 +368,7 @@ export function finalizeExtractedMessages(rawList: RawExtractedMessage[]): Taver
         swipeId: raw.swipeId,
         swipeCount: raw.swipeCount,
         isStreaming: raw.isStreaming,
+        mvuData,
       });
     }
 
@@ -357,22 +392,48 @@ export function finalizeExtractedMessages(rawList: RawExtractedMessage[]): Taver
       blocks,
       renderedHash: computeRenderedHash(blocks),
       isStreaming: Boolean(raw.isStreaming),
+      mvuData,
     };
   });
 }
 
 /**
- * Browser-side extractor script passed to `page.evaluate(...)`.
- * Kept self-contained (zero outer closures) so Playwright can serialize and execute it cleanly.
+ * Browser-side extractor function source passed to `page.evaluate(...)`.
+ * Accepts `{ limit, beforeMesId }` for windowed pagination so large chats stay lightweight.
  */
-export const EXTRACT_CHAT_MESSAGES_PAGE_SCRIPT = `(() => {
+export const EXTRACT_CHAT_MESSAGES_FN_SOURCE = `((opts) => {
   const st = window.SillyTavern;
   const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
   if (!ctx || !Array.isArray(ctx.chat)) {
-    return { userName: "User", messages: [], variables: {} };
+    return {
+      userName: "User",
+      messages: [],
+      variables: {},
+      totalMessageCount: 0,
+      hasMore: false,
+      isLiveGenerating: false,
+    };
   }
 
   const COMPLEX_STYLE_RE = /(?:background|border|grid|flex|padding|margin|position|gradient|box-shadow|border-radius|width|height|display\\s*:\\s*(?:grid|flex|inline-flex)|transform|overflow)/i;
+
+  function computeIsLiveGenerating() {
+    const stopEl = document.querySelector("#mes_stop");
+    let stopVisible = false;
+    if (stopEl) {
+      const style = window.getComputedStyle ? window.getComputedStyle(stopEl) : stopEl.style;
+      stopVisible = Boolean(
+        style &&
+        style.display !== "none" &&
+        style.visibility !== "hidden"
+      );
+    }
+    return Boolean(
+      stopVisible ||
+      ctx.streamingProcessor ||
+      document.body?.dataset?.generating === "true"
+    );
+  }
 
   function inlineToMd(node) {
     if (!node) return "";
@@ -443,13 +504,19 @@ export const EXTRACT_CHAT_MESSAGES_PAGE_SCRIPT = `(() => {
     if (!el || el.nodeType !== 1) return null;
     const tag = el.tagName.toLowerCase();
     if (tag === "iframe") return el;
+    const preferred = el.querySelector("iframe[id^='TH-message'], iframe[srcdoc]");
     const iframes = el.querySelectorAll("iframe");
-    if (iframes.length === 1) {
-      const clone = el.cloneNode(true);
-      clone.querySelectorAll("iframe, style, script").forEach((n) => n.remove());
-      if (!(clone.textContent || "").trim()) {
-        return iframes[0];
-      }
+    const targetIframe = preferred || (iframes.length === 1 ? iframes[0] : null);
+    if (!targetIframe) return null;
+    if (el.classList && el.classList.contains("TH-render")) {
+      return targetIframe;
+    }
+    const clone = el.cloneNode(true);
+    clone
+      .querySelectorAll('iframe, pre, style, script, .TH-collapse-code-block-button, [class*="hidden"]')
+      .forEach((n) => n.remove());
+    if (!(clone.textContent || "").trim()) {
+      return targetIframe;
     }
     return null;
   }
@@ -523,7 +590,6 @@ export const EXTRACT_CHAT_MESSAGES_PAGE_SCRIPT = `(() => {
       const el = node;
       const tag = el.tagName.toLowerCase();
 
-      // Hold standalone <style>/<script> to combine with adjacent HTML card
       if (tag === "style" || tag === "script") {
         pendingAssetHtml.push(el.outerHTML);
         continue;
@@ -532,8 +598,9 @@ export const EXTRACT_CHAT_MESSAGES_PAGE_SCRIPT = `(() => {
       const iframe = findDirectIframe(el);
       if (iframe) {
         flushMd();
-        const rect = iframe.getBoundingClientRect();
-        const h = rect && rect.height > 0 ? rect.height : (el.getBoundingClientRect()?.height || 0);
+        const rect = iframe.getBoundingClientRect ? iframe.getBoundingClientRect() : null;
+        const elRect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+        const h = rect && rect.height > 0 ? rect.height : (elRect && elRect.height > 0 ? elRect.height : 0);
         const prefix = pendingAssetHtml.length > 0 ? pendingAssetHtml.join("\\n") + "\\n" : "";
         pendingAssetHtml = [];
         blocks.push({
@@ -546,7 +613,7 @@ export const EXTRACT_CHAT_MESSAGES_PAGE_SCRIPT = `(() => {
 
       if (tag === "details" && !isComplexHtmlEl(el)) {
         flushMd();
-        const sumEl = el.querySelector(":scope > summary");
+        const sumEl = el.querySelector(":scope > summary") || el.querySelector("summary");
         const summary = sumEl ? (sumEl.textContent || "").trim() : "详情";
         const bodyParts = [];
         for (const child of Array.from(el.childNodes)) {
@@ -577,7 +644,7 @@ export const EXTRACT_CHAT_MESSAGES_PAGE_SCRIPT = `(() => {
         flushMd();
         const prefix = pendingAssetHtml.length > 0 ? pendingAssetHtml.join("\\n") + "\\n" : "";
         pendingAssetHtml = [];
-        const rect = el.getBoundingClientRect();
+        const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
         const htmlStr = prefix + el.outerHTML;
         const prev = blocks[blocks.length - 1];
         if (prev && prev.kind === "html" && prefix) {
@@ -614,13 +681,39 @@ export const EXTRACT_CHAT_MESSAGES_PAGE_SCRIPT = `(() => {
     return blocks;
   }
 
-  const isGenActive = Boolean(
-    ctx.streamingProcessor ||
-    document.querySelector("#mes_stop")?.style?.display === "flex" ||
-    document.body?.dataset?.generating === "true"
-  );
+  function readMvuForMessage(idx, msgObj, swipeId) {
+    try {
+      if (window.Mvu && typeof window.Mvu.getMvuData === "function") {
+        const d = window.Mvu.getMvuData({ type: "message", message_id: idx });
+        if (d && typeof d === "object" && Object.keys(d).length > 0) {
+          return JSON.parse(JSON.stringify(d));
+        }
+      }
+    } catch {}
+    if (msgObj && Array.isArray(msgObj.variables)) {
+      const cand = msgObj.variables[swipeId] || msgObj.variables[0];
+      if (cand && typeof cand === "object" && Object.keys(cand).length > 0) {
+        try {
+          return JSON.parse(JSON.stringify(cand));
+        } catch {}
+      }
+    }
+    return null;
+  }
 
-  const messages = ctx.chat.map((m, idx) => {
+  const isLiveGenerating = computeIsLiveGenerating();
+  const totalMessageCount = ctx.chat.length;
+  const limit = opts && typeof opts.limit === "number" && opts.limit > 0 ? Math.trunc(opts.limit) : 25;
+  const endIndex =
+    opts && typeof opts.beforeMesId === "number" && opts.beforeMesId >= 0
+      ? Math.min(totalMessageCount, Math.trunc(opts.beforeMesId))
+      : totalMessageCount;
+  const startIndex = Math.max(0, endIndex - limit);
+  const hasMore = startIndex > 0;
+
+  const messages = [];
+  for (let idx = startIndex; idx < endIndex; idx++) {
+    const m = ctx.chat[idx];
     const mesEl = document.querySelector('.mes[mesid="' + idx + '"]');
     const mesText = mesEl ? mesEl.querySelector(".mes_text") : null;
     const domReasoningEl = mesEl ? mesEl.querySelector(".mes_reasoning") : null;
@@ -638,9 +731,10 @@ export const EXTRACT_CHAT_MESSAGES_PAGE_SCRIPT = `(() => {
     const swipeCount = Array.isArray(m.swipes) && m.swipes.length > 0 ? m.swipes.length : 1;
     const extraReasoning = m.extra && typeof m.extra.reasoning === "string" ? m.extra.reasoning : "";
     const domReasoning = domReasoningEl ? (domReasoningEl.textContent || "").trim() : "";
-    const isLast = idx === ctx.chat.length - 1;
+    const isLast = idx === totalMessageCount - 1;
+    const mvuData = readMvuForMessage(idx, m, swipeId);
 
-    return {
+    messages.push({
       mesId: idx,
       name: String(m.name || ""),
       avatarPath,
@@ -653,9 +747,10 @@ export const EXTRACT_CHAT_MESSAGES_PAGE_SCRIPT = `(() => {
       swipeCount,
       hasDom: Boolean(mesText),
       rawBlocks: mesText ? extractBlocksFromMesText(mesText) : [],
-      isStreaming: Boolean(isGenActive && isLast && !m.is_user),
-    };
-  });
+      isStreaming: Boolean(isLiveGenerating && isLast && !m.is_user),
+      mvuData,
+    });
+  }
 
   const globalVars =
     ctx.extensionSettings &&
@@ -674,9 +769,42 @@ export const EXTRACT_CHAT_MESSAGES_PAGE_SCRIPT = `(() => {
     variables = {};
   }
 
+  let latestMvu = null;
+  for (let i = totalMessageCount - 1; i >= 0; i--) {
+    const msgObj = ctx.chat[i];
+    const sIdx = msgObj && typeof msgObj.swipe_id === "number" ? msgObj.swipe_id : 0;
+    const found = readMvuForMessage(i, msgObj, sIdx);
+    if (found) {
+      latestMvu = found;
+      break;
+    }
+  }
+  if (latestMvu) {
+    variables.__mvu_latest = latestMvu;
+  }
+
   return {
     userName: String(ctx.name1 || "User"),
     messages,
     variables,
+    totalMessageCount,
+    hasMore,
+    isLiveGenerating,
   };
-})()`;
+})`;
+
+export function buildExtractChatMessagesScript(opts?: {
+  limit?: number;
+  beforeMesId?: number;
+}): string {
+  const payload = {
+    limit: typeof opts?.limit === "number" && opts.limit > 0 ? Math.trunc(opts.limit) : 25,
+    beforeMesId:
+      typeof opts?.beforeMesId === "number" && opts.beforeMesId >= 0
+        ? Math.trunc(opts.beforeMesId)
+        : null,
+  };
+  return `(${EXTRACT_CHAT_MESSAGES_FN_SOURCE})(${JSON.stringify(payload)})`;
+}
+
+export const EXTRACT_CHAT_MESSAGES_PAGE_SCRIPT = buildExtractChatMessagesScript({ limit: 25 });

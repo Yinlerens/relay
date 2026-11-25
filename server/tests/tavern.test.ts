@@ -8,17 +8,21 @@ import { createRelayServer, type RelayServerInstance } from "../src/app.js";
 import type { AppConfig } from "../src/config.js";
 import { TavernAuthStore } from "../src/tavern/auth-store.js";
 import {
+  buildExtractChatMessagesScript,
   buildFallbackMarkdownMessage,
   buildTavernAvatarUrl,
+  cleanIframeDocumentHtml,
   finalizeExtractedMessages,
   rewriteHtmlAssetUrls,
   sanitizeStAssetPath,
+  type RawExtractedMessage,
 } from "../src/tavern/dom-extractor.js";
 import type {
   TavernBridgeLike,
   TavernCharacter,
   TavernChatFile,
   TavernChatState,
+  TavernCurrentOptions,
   TavernMessage,
   TavernStatus,
   TavernSwipeDirection,
@@ -123,9 +127,23 @@ function createMockTavernBridge(): TavernBridgeLike & {
       state.status.currentChatFile = state.chatFile;
       return { state };
     },
-    async getCurrentState() {
-      calls.push("getCurrentState");
-      return { state };
+    async getCurrentState(options?: TavernCurrentOptions) {
+      calls.push(`getCurrentState:${options?.limit ?? ""}:${options?.beforeMesId ?? ""}`);
+      const all = state.messages;
+      const limit = options?.limit ?? 25;
+      const end =
+        options?.beforeMesId !== undefined
+          ? Math.min(all.length, options.beforeMesId)
+          : all.length;
+      const start = Math.max(0, end - limit);
+      return {
+        state: {
+          ...state,
+          messages: all.slice(start, end),
+          totalMessageCount: all.length,
+          hasMore: start > 0,
+        },
+      };
     },
     async sendMessage(text: string) {
       calls.push(`send:${text}`);
@@ -380,6 +398,17 @@ describe("Tavern Bridge Utilities & Routes", () => {
         res.end(pngBytes);
         return;
       }
+      if (req.url?.endsWith(".js")) {
+        // Deliberately send generic content-type to verify server enforces JS MIME
+        res.writeHead(200, { "Content-Type": "application/octet-stream" });
+        res.end("console.log('tailwind');");
+        return;
+      }
+      if (req.url?.endsWith(".css")) {
+        res.writeHead(200, { "Content-Type": "application/octet-stream" });
+        res.end("body { color: #fff; }");
+        return;
+      }
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "not found" }));
     });
@@ -456,6 +485,21 @@ describe("Tavern Bridge Utilities & Routes", () => {
     const assetBuf = Buffer.from(await assetRes.arrayBuffer());
     assert.deepEqual(assetBuf, pngBytes);
 
+    // JS & CSS MIME enforcement on /api/tavern/asset
+    const jsRes = await fetch(
+      `${baseUrl}/api/tavern/asset?path=${encodeURIComponent("/scripts/extensions/third-party/JS-Slash-Runner/lib/tailwindcss.min.js")}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    assert.equal(jsRes.status, 200);
+    assert.equal(jsRes.headers.get("content-type"), "application/javascript; charset=utf-8");
+
+    const cssRes = await fetch(
+      `${baseUrl}/api/tavern/asset?path=${encodeURIComponent("/css/card.css")}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    assert.equal(cssRes.status, 200);
+    assert.equal(cssRes.headers.get("content-type"), "text/css; charset=utf-8");
+
     // 3. Full Tavern REST surface
     const stRes = await api("/api/tavern/status");
     assert.equal(stRes.status, 200);
@@ -488,9 +532,15 @@ describe("Tavern Bridge Utilities & Routes", () => {
     assert.equal(selectRes.json.state.messages.length, 3);
     assert.equal(selectRes.json.state.messages[2].reasoning, "Checking star chart");
 
-    const curRes = await api("/api/tavern/current");
+    const curRes = await api("/api/tavern/current?limit=2&before=3");
     assert.equal(curRes.status, 200);
     assert.equal(curRes.json.state.userName, "You");
+    assert.equal(curRes.json.state.totalMessageCount, 3);
+    assert.equal(curRes.json.state.hasMore, true);
+    assert.deepEqual(
+      curRes.json.state.messages.map((m: TavernMessage) => m.mesId),
+      [1, 2]
+    );
 
     const sendRes = await api("/api/tavern/send", {
       method: "POST",
@@ -546,5 +596,301 @@ describe("Tavern Bridge Utilities & Routes", () => {
     const reloadRes = await api("/api/tavern/reload", { method: "POST" });
     assert.equal(reloadRes.status, 200);
     assert.equal(reloadRes.json.characters.length, 1);
+  });
+
+  it("unwraps TH-render iframes cleanly, strips blob scripts, rewrites ST assets, extracts MVU data, and paginates windows", () => {
+    // 1. Direct cleanIframeDocumentHtml test
+    const rawIframeDoc = [
+      "<!DOCTYPE html><html><head>",
+      '<script src="blob:http://127.0.0.1:8000/1111-2222-3333"></script>',
+      "<script type='module' src='blob:http://127.0.0.1:8000/4444'>\n</script>",
+      '<script src="/scripts/extensions/third-party/JS-Slash-Runner/lib/tailwindcss.min.js"></script>',
+      '<script src="https://cdn.example.com/lib.js"></script>',
+      '<link rel="stylesheet" href="/css/oracle.css" />',
+      "</head><body>",
+      '<img src="/characters/Seraphina.png" />',
+      '<img src="/User Avatars/player.png" />',
+      '<div style="background: url(/user/images/bg.webp)">Status</div>',
+      "</body></html>",
+    ].join("\n");
+
+    const cleaned = cleanIframeDocumentHtml(rawIframeDoc);
+    assert.equal(cleaned.includes("blob:http://"), false);
+    assert.ok(cleaned.includes('src="https://cdn.example.com/lib.js"'));
+    assert.ok(
+      cleaned.includes(
+        'src="relay-st://asset?path=%2Fscripts%2Fextensions%2Fthird-party%2FJS-Slash-Runner%2Flib%2Ftailwindcss.min.js"'
+      )
+    );
+    assert.ok(cleaned.includes('href="relay-st://asset?path=%2Fcss%2Foracle.css"'));
+    assert.ok(cleaned.includes('src="relay-st://asset?path=%2Fcharacters%2FSeraphina.png"'));
+    assert.ok(cleaned.includes('src="relay-st://asset?path=%2FUser%20Avatars%2Fplayer.png"'));
+    assert.ok(cleaned.includes('url("relay-st://asset?path=%2Fuser%2Fimages%2Fbg.webp")'));
+
+    // 2. Fallback markdown strips MVU/XML control tags while keeping rawText intact
+    const fallback = buildFallbackMarkdownMessage({
+      mesId: 9,
+      name: "Seraphina",
+      isUser: false,
+      isSystem: false,
+      rawText:
+        "Visible prose.<UpdateVariable>hp = 99</UpdateVariable><StatusPlaceHolderImpl/><comment>internal note</comment>",
+      mvuData: { stat_data: { hp: 99 } },
+    });
+    assert.equal(fallback.blocks[0].markdown, "Visible prose.");
+    assert.deepEqual(fallback.mvuData, { stat_data: { hp: 99 } });
+    assert.ok(fallback.rawText.includes("<UpdateVariable>"));
+
+    // 3. Execute browser-side extractor script on a mock TH-render DOM + 4-message paginated chat
+    interface MockEl {
+      nodeType: 1;
+      tagName: string;
+      className: string;
+      classList: { contains: (c: string) => boolean };
+      attrs: Record<string, string>;
+      childNodes: Array<MockEl | { nodeType: 3; nodeValue: string }>;
+      children: MockEl[];
+      textContent: string;
+      outerHTML: string;
+      style: Record<string, string>;
+      getAttribute: (k: string) => string | null;
+      getBoundingClientRect: () => { height: number };
+      querySelector: (sel: string) => MockEl | null;
+      querySelectorAll: (sel: string) => MockEl[];
+      cloneNode: () => MockEl;
+      remove: () => void;
+    }
+
+    const makeEl = (
+      tag: string,
+      opts: {
+        id?: string;
+        classes?: string[];
+        attrs?: Record<string, string>;
+        children?: Array<MockEl | { nodeType: 3; nodeValue: string }>;
+        height?: number;
+        outerHTML?: string;
+        style?: Record<string, string>;
+      } = {}
+    ): MockEl => {
+      const classes = opts.classes || [];
+      const attrs = { ...(opts.attrs || {}) };
+      if (opts.id) attrs.id = opts.id;
+      if (classes.length) attrs.class = classes.join(" ");
+      let kids = opts.children ? [...opts.children] : [];
+
+      const matchesSimple = (el: MockEl, sel: string): boolean => {
+        const s = sel.trim();
+        if (s === "iframe") return el.tagName === "IFRAME";
+        if (s === "iframe[id^='TH-message']")
+          return el.tagName === "IFRAME" && (el.getAttribute("id") || "").startsWith("TH-message");
+        if (s === "iframe[srcdoc]")
+          return el.tagName === "IFRAME" && el.getAttribute("srcdoc") !== null;
+        if (s === "pre") return el.tagName === "PRE";
+        if (s === "style") return el.tagName === "STYLE";
+        if (s === "script") return el.tagName === "SCRIPT";
+        if (s === "svg") return el.tagName === "SVG";
+        if (s === "img") return el.tagName === "IMG";
+        if (s === "[style]") return el.getAttribute("style") !== null;
+        if (s === ".TH-collapse-code-block-button")
+          return el.classList.contains("TH-collapse-code-block-button");
+        if (s === '[class*="hidden"]') return el.className.includes("hidden");
+        return false;
+      };
+
+      const matchesSelector = (el: MockEl, selector: string): boolean =>
+        selector.split(",").some((part) => matchesSimple(el, part));
+
+      const collect = (node: MockEl, selector: string, out: MockEl[]): void => {
+        for (const c of node.childNodes) {
+          if (c.nodeType === 1) {
+            const ce = c as MockEl;
+            if (matchesSelector(ce, selector)) out.push(ce);
+            collect(ce, selector, out);
+          }
+        }
+      };
+
+      const el: MockEl = {
+        nodeType: 1,
+        tagName: tag.toUpperCase(),
+        className: classes.join(" "),
+        classList: { contains: (c) => classes.includes(c) },
+        attrs,
+        get childNodes() {
+          return kids;
+        },
+        get children() {
+          return kids.filter((k): k is MockEl => k.nodeType === 1);
+        },
+        get textContent() {
+          return kids
+            .map((k) => (k.nodeType === 3 ? k.nodeValue : (k as MockEl).textContent))
+            .join("");
+        },
+        outerHTML: opts.outerHTML || `<${tag}></${tag}>`,
+        style: opts.style || {},
+        getAttribute: (k) => (Object.prototype.hasOwnProperty.call(attrs, k) ? attrs[k] : null),
+        getBoundingClientRect: () => ({ height: opts.height ?? 0 }),
+        querySelector: (sel) => {
+          const found: MockEl[] = [];
+          collect(el, sel, found);
+          return found[0] ?? null;
+        },
+        querySelectorAll: (sel) => {
+          const found: MockEl[] = [];
+          collect(el, sel, found);
+          return found;
+        },
+        cloneNode: () =>
+          makeEl(tag, {
+            id: opts.id,
+            classes: [...classes],
+            attrs: { ...attrs },
+            children: kids.map((k) => (k.nodeType === 3 ? { ...k } : (k as MockEl).cloneNode())),
+            height: opts.height,
+            outerHTML: opts.outerHTML,
+            style: { ...(opts.style || {}) },
+          }),
+        remove: () => {},
+      };
+
+      const attachRemove = (parent: MockEl) => {
+        for (const c of parent.childNodes) {
+          if (c.nodeType === 1) {
+            const ce = c as MockEl;
+            ce.remove = () => {
+              kids = kids.filter((x) => x !== ce);
+            };
+            attachRemove(ce);
+          }
+        }
+      };
+      attachRemove(el);
+      return el;
+    };
+
+    const iframeEl = makeEl("iframe", {
+      id: "TH-message--3--0",
+      attrs: { srcdoc: rawIframeDoc },
+      height: 312.6,
+    });
+    const thRenderDiv = makeEl("div", {
+      classes: ["TH-render"],
+      children: [
+        makeEl("div", {
+          classes: ["TH-collapse-code-block-button"],
+          children: [{ nodeType: 3, nodeValue: "Toggle source" }],
+        }),
+        makeEl("pre", {
+          classes: ["hidden!"],
+          children: [{ nodeType: 3, nodeValue: "<html>RAW_PRE_SOURCE</html>" }],
+        }),
+        iframeEl,
+      ],
+      height: 320,
+      outerHTML: '<div class="TH-render"><pre class="hidden!">RAW_PRE_SOURCE</pre></div>',
+    });
+    const proseP = makeEl("p", {
+      children: [{ nodeType: 3, nodeValue: "Night falls over the spire." }],
+    });
+    const mes3Text = makeEl("div", {
+      classes: ["mes_text"],
+      children: [proseP, thRenderDiv],
+    });
+    const mes3El = {
+      querySelector: (sel: string) => (sel === ".mes_text" ? mes3Text : null),
+    };
+    const stopEl = makeEl("div", { id: "mes_stop", style: { display: "none", visibility: "hidden" } });
+
+    const mockWindow = {
+      SillyTavern: {
+        getContext: () => ({
+          name1: "Player",
+          characterId: 0,
+          characters: [{ name: "Seraphina", avatar: "Seraphina.png" }],
+          streamingProcessor: null,
+          chatMetadata: { variables: { localFlag: true } },
+          extensionSettings: { variables: { global: { globalVer: 2 } } },
+          chat: [
+            { name: "Seraphina", is_user: false, mes: "Floor 0", swipe_id: 0, swipes: ["Floor 0"] },
+            { name: "Player", is_user: true, mes: "Floor 1" },
+            {
+              name: "Seraphina",
+              is_user: false,
+              mes: "Floor 2",
+              swipe_id: 0,
+              swipes: ["Floor 2"],
+              variables: [{ stat_data: { turn: 2 } }],
+            },
+            {
+              name: "Seraphina",
+              is_user: false,
+              mes: "Floor 3",
+              swipe_id: 0,
+              swipes: ["Floor 3"],
+            },
+          ],
+        }),
+      },
+      Mvu: {
+        getMvuData: (opts: { message_id: number }) =>
+          opts.message_id === 3 ? { stat_data: { turn: 3, affinity: 88 } } : null,
+      },
+      getComputedStyle: (node: MockEl) => node.style,
+    };
+    const mockDocument = {
+      body: { dataset: { generating: "false" } },
+      querySelector: (sel: string) => {
+        if (sel === "#mes_stop") return stopEl;
+        if (sel === '.mes[mesid="3"]') return mes3El;
+        return null;
+      },
+    };
+
+    // Latest window (limit=2 -> floors 2 & 3)
+    const runPageScript = (opts: { limit?: number; beforeMesId?: number }) => {
+      const code = buildExtractChatMessagesScript(opts);
+      const fn = new Function("window", "document", `return ${code};`);
+      return fn(mockWindow, mockDocument) as {
+        userName: string;
+        messages: RawExtractedMessage[];
+        variables: Record<string, unknown>;
+        totalMessageCount: number;
+        hasMore: boolean;
+        isLiveGenerating: boolean;
+      };
+    };
+
+    const page1 = runPageScript({ limit: 2 });
+    assert.equal(page1.totalMessageCount, 4);
+    assert.equal(page1.hasMore, true);
+    assert.equal(page1.isLiveGenerating, false);
+    assert.deepEqual(page1.messages.map((m) => m.mesId), [2, 3]);
+    assert.deepEqual(page1.variables.__mvu_latest, { stat_data: { turn: 3, affinity: 88 } });
+
+    const finalized = finalizeExtractedMessages(page1.messages);
+    assert.deepEqual(finalized[0].mvuData, { stat_data: { turn: 2 } });
+    assert.deepEqual(finalized[1].mvuData, { stat_data: { turn: 3, affinity: 88 } });
+    assert.equal(finalized[1].blocks.length, 2);
+    assert.equal(finalized[1].blocks[0].kind, "markdown");
+    assert.equal(finalized[1].blocks[0].markdown, "Night falls over the spire.");
+    assert.equal(finalized[1].blocks[1].kind, "iframe");
+    assert.equal(finalized[1].blocks[1].estimatedHeight, 313);
+    const iframeHtml = finalized[1].blocks[1].html || "";
+    assert.equal(iframeHtml.includes("TH-collapse-code-block-button"), false);
+    assert.equal(iframeHtml.includes("RAW_PRE_SOURCE"), false);
+    assert.equal(iframeHtml.includes("blob:http://"), false);
+    assert.ok(
+      iframeHtml.includes(
+        "relay-st://asset?path=%2Fscripts%2Fextensions%2Fthird-party%2FJS-Slash-Runner%2Flib%2Ftailwindcss.min.js"
+      )
+    );
+
+    // Earlier window (limit=2, beforeMesId=2 -> floors 0 & 1, hasMore=false)
+    const page2 = runPageScript({ limit: 2, beforeMesId: 2 });
+    assert.equal(page2.totalMessageCount, 4);
+    assert.equal(page2.hasMore, false);
+    assert.deepEqual(page2.messages.map((m) => m.mesId), [0, 1]);
   });
 });
