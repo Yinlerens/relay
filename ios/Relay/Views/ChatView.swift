@@ -16,6 +16,7 @@ struct ChatView: View {
     @State private var draft = ""
     @State private var showConfig = false
     @State private var showContextInfo = false
+    @State private var showQuota = false
     @State private var isAtBottom = true
     @State private var viewportHeight: CGFloat = 0
     @State private var lightbox: Attachment?
@@ -165,8 +166,14 @@ struct ChatView: View {
                 }
                 .accessibilityLabel("上下文用量")
                 .popover(isPresented: $showContextInfo) {
-                    ContextInfoView(session: session, tint: style.tint)
-                        .presentationCompactAdaptation(.popover)
+                    ContextInfoView(session: session, tint: style.tint) {
+                        showContextInfo = false
+                        Task {
+                            try? await Task.sleep(nanoseconds: 380_000_000)
+                            showQuota = true
+                        }
+                    }
+                    .presentationCompactAdaptation(.popover)
                 }
 
                 Button {
@@ -183,6 +190,9 @@ struct ChatView: View {
         }
         .fullScreenCover(item: $lightbox) { attachment in
             LightboxView(attachment: attachment)
+        }
+        .sheet(isPresented: $showQuota) {
+            QuotaSheet(focusAgent: session?.agentId)
         }
         .task(id: sessionId) {
             store.activeSessionId = sessionId
@@ -248,11 +258,16 @@ struct ScrollToBottomPill: View {
 struct ContextInfoView: View {
     var session: SessionSummary?
     var tint: Color
+    var onOpenQuotas: () -> Void
+
+    private var showsCredits: Bool {
+        session?.agentId == "codebuddy" || (session?.totalCredits ?? 0) > 0
+    }
 
     var body: some View {
         let used = Double(session?.contextUsed ?? 0)
         let size = Double(session?.contextSize ?? 0)
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             Eyebrow(text: "上下文窗口")
             HStack(alignment: .center, spacing: 14) {
                 ContextRing(fraction: session?.contextFraction ?? 0, size: 52, lineWidth: 5)
@@ -266,9 +281,54 @@ struct ContextInfoView: View {
                         .foregroundStyle(Palette.textSecondary)
                 }
             }
+
+            if showsCredits {
+                Divider().overlay(Palette.hairline)
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Eyebrow(text: "本会话累计积分")
+                        HStack(alignment: .firstTextBaseline, spacing: 4) {
+                            Text(RelayFormat.credits(session?.totalCredits ?? 0))
+                                .font(RelayFont.rounded(21, weight: .semibold))
+                                .monospacedDigit()
+                                .foregroundStyle(Palette.textPrimary)
+                                .contentTransition(.numericText(value: session?.totalCredits ?? 0))
+                            Text("积分")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Palette.textTertiary)
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    Image(systemName: "creditcard")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(tint)
+                }
+            }
+
+            Button {
+                Haptics.tap()
+                onOpenQuotas()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "gauge.with.dots.needle.bottom.50percent")
+                    Text("查看全部限额与积分")
+                    Spacer(minLength: 6)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .bold))
+                }
+                .font(.system(size: 13.5, weight: .semibold))
+                .foregroundStyle(tint)
+                .padding(.horizontal, 12)
+                .frame(height: 40)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(tint.opacity(0.11))
+                )
+            }
+            .buttonStyle(.pressable)
         }
         .padding(18)
-        .frame(minWidth: 240)
+        .frame(minWidth: 260)
     }
 }
 

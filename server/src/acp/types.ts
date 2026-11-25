@@ -56,6 +56,8 @@ export interface UsageStats {
   cachedReadTokens?: number;
   thoughtTokens?: number;
   totalTokens?: number;
+  credits?: number;
+  originalCredits?: number;
 }
 
 export interface JsonRpcResponse {

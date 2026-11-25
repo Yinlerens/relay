@@ -107,6 +107,27 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
         case .light: return .light
         }
     }
+
+    var uiInterfaceStyle: UIUserInterfaceStyle {
+        switch self {
+        case .system: return .unspecified
+        case .dark: return .dark
+        case .light: return .light
+        }
+    }
+
+    /// Applies the style at the window level so that already-presented sheets / popovers / full-screen covers
+    /// switch immediately too (`.preferredColorScheme` does not reset an existing sheet's override).
+    @MainActor
+    func applyToWindows() {
+        let style = uiInterfaceStyle
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            for window in windowScene.windows where window.overrideUserInterfaceStyle != style {
+                window.overrideUserInterfaceStyle = style
+            }
+        }
+    }
 }
 
 enum SettingsKey {
@@ -218,6 +239,19 @@ extension AppStore {
 // MARK: - Formatting
 
 enum RelayFormat {
+    /// Credits: `3.08`, `0.0042`, `12` — trims trailing zeros, keeps precision for tiny values.
+    static func credits(_ value: Double) -> String {
+        let magnitude = abs(value)
+        if magnitude == 0 { return "0" }
+        let digits = magnitude < 0.01 ? 4 : (magnitude < 100 ? 2 : 1)
+        var text = String(format: "%.\(digits)f", value)
+        if text.contains(".") {
+            while text.hasSuffix("0") { text.removeLast() }
+            if text.hasSuffix(".") { text.removeLast() }
+        }
+        return text
+    }
+
     static func tokens(_ value: Double) -> String {
         if value >= 1_000_000 { return String(format: "%.1fM", value / 1_000_000) }
         if value >= 1_000 { return String(format: "%.1fk", value / 1_000) }

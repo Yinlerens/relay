@@ -12,8 +12,12 @@
 
 编辑服务端 `/opt/relay/agents.json`（参考 `server/agents.example.json`），增加一条带 `command` 与 `args` 的配置并重启 `relay.service` 即可。
 
-## 在 iPhone 上安装原生 App（无 Mac / 无开发者账号）
+## 在 iPhone 上安装与自动更新原生 App（无 Mac / 无开发者账号）
 
-1. 将本仓库推到 GitHub（公开仓库使用标准 `macos-latest` Runner 免费不限时；私有仓库也可手动触发消耗免费额度）。
-2. 在 GitHub **Actions** 中手动运行 **Build Unsigned IPA for SideStore**，下载产物 `Relay-unsigned.ipa`。
-3. 用 iPhone 上的 **SideStore** 打开 `.ipa` 安装并签名，首次打开填入服务端地址与 `RELAY_TOKEN` 即可使用。
+1. 将本仓库推到 GitHub（公开仓库使用标准 `macos-latest` Runner 免费不限时；推送改动 `ios/**` 会自动触发编译并发布到 `latest` Release）。
+2. **SideStore / Feather 软件源地址**：
+   ```text
+   https://github.com/Yinlerens/relay/releases/download/latest/source.json
+   ```
+   在手机端 **SideStore → Sources → `+`** 添加上述软件源即可一键安装并在后续自动接收更新提醒。
+3. 首次打开填入服务端地址与 `RELAY_TOKEN` 后将自动保存在系统 Keychain 中，后续同签名覆盖更新无需重复配对。

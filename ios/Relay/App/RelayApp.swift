@@ -19,7 +19,12 @@ struct RelayApp: App {
         WindowGroup {
             RootView()
                 .environment(store)
-                .preferredColorScheme(appearance.colorScheme)
+                .onAppear {
+                    appearance.applyToWindows()
+                }
+                .onChange(of: appearance) { _, mode in
+                    mode.applyToWindows()
+                }
                 .onOpenURL { url in
                     store.handleDeepLink(url)
                 }

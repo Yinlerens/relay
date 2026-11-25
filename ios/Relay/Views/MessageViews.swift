@@ -254,8 +254,32 @@ struct AssistantMessageView: View {
                     .monospacedDigit()
                     .foregroundStyle(Palette.textTertiary)
             }
+            if let usage = message.usage, let credits = usage.credits {
+                creditBadge(credits: credits, saved: usage.savedCredits)
+            }
             Spacer()
         }
+    }
+
+    private func creditBadge(credits: Double, saved: Double) -> some View {
+        let isFree = credits == 0 && saved > 0
+        let text = isFree
+            ? "免费 · 0 积分（省 \(RelayFormat.credits(saved))）"
+            : "\(RelayFormat.credits(credits)) 积分"
+        let color = isFree ? Palette.success : style.tint
+        return HStack(spacing: 4) {
+            Image(systemName: isFree ? "leaf.fill" : "creditcard.fill")
+                .font(.system(size: 9, weight: .bold))
+            Text(text)
+                .monospacedDigit()
+        }
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(color)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(Capsule(style: .continuous).fill(color.opacity(0.12)))
+        .overlay(Capsule(style: .continuous).stroke(color.opacity(0.22), lineWidth: 0.5))
+        .accessibilityLabel(text)
     }
 }
 

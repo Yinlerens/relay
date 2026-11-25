@@ -23,6 +23,7 @@ export interface SessionSummary {
   availableCommands: AcpSlashCommand[];
   contextUsed: number;
   contextSize: number;
+  totalCredits: number;
   isRunning: boolean;
   createdAt: number;
   updatedAt: number;
@@ -147,6 +148,7 @@ export class RelayDatabase {
       availableCommands: safeJson<AcpSlashCommand[]>(row.available_commands_json, []),
       contextUsed: Number(row.context_used || 0),
       contextSize: Number(row.context_size || 0),
+      totalCredits: Math.round(Number(row.total_credits || 0) * 10000) / 10000,
       isRunning: runningIds ? runningIds.has(id) : false,
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
@@ -170,14 +172,44 @@ export class RelayDatabase {
 
   listSessions(runningIds?: Set<string>): SessionSummary[] {
     const rows = this.db
-      .prepare("SELECT * FROM sessions ORDER BY updated_at DESC")
+      .prepare(
+        `SELECT s.*, COALESCE(c.total_credits, 0) AS total_credits
+         FROM sessions s
+         LEFT JOIN (
+           SELECT session_id,
+                  SUM(CAST(json_extract(usage_json, '$.credits') AS REAL)) AS total_credits
+           FROM messages
+           WHERE role = 'assistant'
+             AND usage_json IS NOT NULL
+             AND json_valid(usage_json) = 1
+             AND typeof(json_extract(usage_json, '$.credits')) IN ('integer', 'real')
+           GROUP BY session_id
+         ) c ON c.session_id = s.id
+         ORDER BY s.updated_at DESC`
+      )
       .all() as Record<string, unknown>[];
     return rows.map((row) => this.mapSession(row, runningIds));
   }
 
   getSession(id: string, runningIds?: Set<string>): SessionSummary | null {
     const row = this.db
-      .prepare("SELECT * FROM sessions WHERE id = ?")
+      .prepare(
+        `SELECT s.*,
+                COALESCE(
+                  (
+                    SELECT SUM(CAST(json_extract(m.usage_json, '$.credits') AS REAL))
+                    FROM messages m
+                    WHERE m.session_id = s.id
+                      AND m.role = 'assistant'
+                      AND m.usage_json IS NOT NULL
+                      AND json_valid(m.usage_json) = 1
+                      AND typeof(json_extract(m.usage_json, '$.credits')) IN ('integer', 'real')
+                  ),
+                  0
+                ) AS total_credits
+         FROM sessions s
+         WHERE s.id = ?`
+      )
       .get(id) as Record<string, unknown> | undefined;
     return row ? this.mapSession(row, runningIds) : null;
   }

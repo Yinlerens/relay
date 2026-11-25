@@ -13,6 +13,7 @@ struct SessionListView: View {
     @State private var search = ""
     @State private var showSettings = false
     @State private var showNewSession = false
+    @State private var showQuota = false
     @State private var renameTarget: SessionSummary?
     @State private var renameText = ""
     @State private var showRename = false
@@ -120,6 +121,15 @@ struct SessionListView: View {
                     .accessibilityLabel("设置")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showQuota = true
+                        Haptics.tap()
+                    } label: {
+                        Image(systemName: "gauge.with.dots.needle.bottom.50percent")
+                    }
+                    .accessibilityLabel("限额与积分")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Section("快速新建") {
                             ForEach(store.agents) { agent in
@@ -156,6 +166,14 @@ struct SessionListView: View {
         .sheet(isPresented: $showNewSession) {
             NewSessionSheet { created in
                 path.append(created.id)
+            }
+        }
+        .sheet(isPresented: $showQuota) {
+            QuotaSheet()
+        }
+        .task(id: store.hasBootstrapped) {
+            if store.hasBootstrapped && store.quotas == nil {
+                await store.loadQuotas()
             }
         }
         .alert("重命名会话", isPresented: $showRename) {
@@ -230,6 +248,8 @@ struct SessionListView: View {
             Text(statusText)
                 .font(.system(size: 12.5, weight: .medium))
                 .foregroundStyle(Palette.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
                 .contentTransition(.opacity)
             Spacer()
             let running = store.sessions.filter(\.isRunning).count
@@ -241,8 +261,38 @@ struct SessionListView: View {
                     .padding(.vertical, 4)
                     .background(Capsule().fill(Palette.fieldFill))
             }
+            Button {
+                showQuota = true
+                Haptics.tap(.soft)
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "gauge.with.dots.needle.bottom.50percent")
+                        .font(.system(size: 10.5, weight: .semibold))
+                    Text(quotaChipText)
+                        .monospacedDigit()
+                        .contentTransition(.numericText())
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundStyle(Palette.textTertiary)
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Palette.textSecondary)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Palette.fieldFill))
+                .overlay(Capsule().stroke(Palette.hairline, lineWidth: 0.5))
+            }
+            .buttonStyle(.pressable)
+            .accessibilityLabel("限额与积分")
         }
         .animation(.easeInOut(duration: 0.25), value: store.socketState)
+    }
+
+    private var quotaChipText: String {
+        if let usage = store.quotas?.codebuddy, usage.available {
+            return "今日 \(RelayFormat.credits(usage.todayCredits)) 积分"
+        }
+        return "限额"
     }
 
     private var statusColor: Color {

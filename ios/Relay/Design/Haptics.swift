@@ -22,6 +22,11 @@ enum Haptics {
         generator.selectionChanged()
     }
 
+    /// Alias of `selection()`.
+    static func select() {
+        selection()
+    }
+
     static func success() {
         notify(.success)
     }

@@ -201,11 +201,13 @@ struct SessionSummary: Codable, Identifiable, Hashable, Sendable {
     var isRunning: Bool
     var createdAt: Double
     var updatedAt: Double
+    /// Sum of CodeBuddy credits charged across this session's assistant turns (server-computed, optional).
+    var totalCredits: Double?
 
     enum CodingKeys: String, CodingKey {
         case id, agentId, acpSessionId, title, cwd, currentModelId, currentModeId
         case availableModels, availableModes, configOptions, availableCommands
-        case contextUsed, contextSize, isRunning, createdAt, updatedAt
+        case contextUsed, contextSize, isRunning, createdAt, updatedAt, totalCredits
     }
 
     init(from decoder: Decoder) throws {
@@ -226,6 +228,7 @@ struct SessionSummary: Codable, Identifiable, Hashable, Sendable {
         isRunning = c.flexBool(.isRunning)
         createdAt = c.flexDouble(.createdAt)
         updatedAt = c.flexDouble(.updatedAt)
+        totalCredits = c.flexOptionalDouble(.totalCredits)
     }
 
     var updatedDate: Date { Date(timeIntervalSince1970: updatedAt / 1000) }
@@ -309,8 +312,14 @@ struct UsageStats: Codable, Hashable, Sendable {
     var cachedReadTokens: Double?
     var thoughtTokens: Double?
     var totalTokens: Double?
+    /// CodeBuddy credits actually charged for this turn.
+    var credits: Double?
+    /// CodeBuddy list price before free-model discounts.
+    var originalCredits: Double?
 
-    enum CodingKeys: String, CodingKey { case inputTokens, outputTokens, cachedReadTokens, thoughtTokens, totalTokens }
+    enum CodingKeys: String, CodingKey {
+        case inputTokens, outputTokens, cachedReadTokens, thoughtTokens, totalTokens, credits, originalCredits
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -319,12 +328,20 @@ struct UsageStats: Codable, Hashable, Sendable {
         cachedReadTokens = c.flexOptionalDouble(.cachedReadTokens)
         thoughtTokens = c.flexOptionalDouble(.thoughtTokens)
         totalTokens = c.flexOptionalDouble(.totalTokens)
+        credits = c.flexOptionalDouble(.credits)
+        originalCredits = c.flexOptionalDouble(.originalCredits)
     }
 
     var displayTotal: Double? {
         if let totalTokens { return totalTokens }
         let sum = (inputTokens ?? 0) + (outputTokens ?? 0)
         return sum > 0 ? sum : nil
+    }
+
+    /// Credits saved by free / discounted models on this turn.
+    var savedCredits: Double {
+        guard let credits, let originalCredits else { return 0 }
+        return max(0, originalCredits - credits)
     }
 }
 

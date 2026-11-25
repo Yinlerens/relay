@@ -37,11 +37,94 @@ interface ActiveTurn {
   content: string;
   thinking: string;
   toolCalls: ToolActivityItem[];
+  usage: UsageStats | null;
+  seenUsageIds: Set<string>;
   cancelled: boolean;
   lastFlushAt: number;
 }
 
 const IDLE_TTL_MS = 30 * 60_000;
+
+export function roundCredits(value: number): number {
+  return Math.round(value * 10_000) / 10_000;
+}
+
+/** Accumulate per-call CodeBuddy usage metadata onto an active turn with deduplication. */
+export function accumulateUsageFromMeta(
+  usage: UsageStats | null,
+  seenUsageIds: Set<string>,
+  meta: Record<string, unknown>
+): UsageStats | null {
+  const rawUsage = meta.usage;
+  if (!rawUsage || typeof rawUsage !== "object") {
+    return usage;
+  }
+
+  const dedupeKey = String(meta["codebuddy.ai/messageId"] || meta["codebuddy.ai/requestId"] || "").trim();
+  if (dedupeKey) {
+    if (seenUsageIds.has(dedupeKey)) {
+      return usage;
+    }
+    seenUsageIds.add(dedupeKey);
+  }
+
+  const src = rawUsage as Record<string, unknown>;
+  const acc: UsageStats = usage ? { ...usage } : {};
+  let touched = false;
+
+  const addInt = (targetKey: "inputTokens" | "outputTokens" | "cachedReadTokens" | "thoughtTokens" | "totalTokens", rawVal: unknown) => {
+    if (typeof rawVal === "number" && Number.isFinite(rawVal)) {
+      acc[targetKey] = (acc[targetKey] ?? 0) + rawVal;
+      touched = true;
+    }
+  };
+
+  addInt("inputTokens", src.prompt_tokens);
+  addInt("outputTokens", src.completion_tokens);
+  addInt("cachedReadTokens", src.cache_read_input_tokens);
+  addInt("thoughtTokens", src.completion_thinking_tokens);
+  addInt("totalTokens", src.total_tokens);
+
+  if (typeof src.credit === "number" && Number.isFinite(src.credit)) {
+    acc.credits = roundCredits((acc.credits ?? 0) + src.credit);
+    touched = true;
+  }
+  if (typeof src.original_credit === "number" && Number.isFinite(src.original_credit)) {
+    acc.originalCredits = roundCredits((acc.originalCredits ?? 0) + src.original_credit);
+    touched = true;
+  }
+
+  return touched ? acc : usage;
+}
+
+/** Merge ACP prompt result usage (e.g. agy) with accumulated turn usage (e.g. codebuddy credits). */
+export function mergeUsageStats(
+  resUsage: UsageStats | null,
+  turnUsage: UsageStats | null
+): UsageStats | null {
+  if (!resUsage && !turnUsage) {
+    return null;
+  }
+  const merged: UsageStats = turnUsage ? { ...turnUsage } : {};
+  if (resUsage) {
+    const keys: Array<keyof UsageStats> = [
+      "inputTokens",
+      "outputTokens",
+      "cachedReadTokens",
+      "thoughtTokens",
+      "totalTokens",
+      "credits",
+      "originalCredits",
+    ];
+    for (const k of keys) {
+      const val = resUsage[k];
+      if (typeof val === "number" && Number.isFinite(val)) {
+        merged[k] = val;
+      }
+    }
+  }
+  return Object.keys(merged).length > 0 ? merged : null;
+}
 
 function extractModels(raw: unknown): {
   currentModelId: string | null;
@@ -540,6 +623,8 @@ export class SessionManager {
       content: "",
       thinking: "",
       toolCalls: [],
+      usage: null,
+      seenUsageIds: new Set<string>(),
       cancelled: false,
       lastFlushAt: Date.now(),
     };
@@ -567,8 +652,9 @@ export class SessionManager {
       this.refreshIdleTimer(worker);
 
       const stopReason = typeof res.stopReason === "string" ? res.stopReason : "end_turn";
-      const usage =
+      const resUsage =
         res.usage && typeof res.usage === "object" ? (res.usage as UsageStats) : null;
+      const usage = mergeUsageStats(resUsage, turn.usage);
       const finalStatus =
         turn.cancelled || stopReason === "cancelled" ? "cancelled" : "completed";
 
@@ -749,6 +835,13 @@ export class SessionManager {
             contextUsed: used ?? 0,
             contextSize: size ?? 0,
           });
+        }
+        if (turn && update._meta && typeof update._meta === "object") {
+          turn.usage = accumulateUsageFromMeta(
+            turn.usage,
+            turn.seenUsageIds,
+            update._meta as Record<string, unknown>
+          );
         }
         break;
       }

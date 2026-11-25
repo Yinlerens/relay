@@ -8,6 +8,7 @@ struct SettingsView: View {
     @State private var barkDraft = ""
     @State private var savingBark = false
     @State private var confirmSignOut = false
+    @State private var showQuota = false
 
     private var version: String {
         let info = Bundle.main.infoDictionary
@@ -40,6 +41,27 @@ struct SettingsView: View {
                     .padding(.vertical, 4)
                     LabeledContent("Agents", value: "\(store.agents.count)")
                     LabeledContent("会话", value: "\(store.sessions.count)")
+                    Button {
+                        Haptics.tap()
+                        showQuota = true
+                    } label: {
+                        HStack(spacing: 12) {
+                            Label("限额与积分用量", systemImage: "gauge.with.dots.needle.bottom.50percent")
+                                .foregroundStyle(Palette.textPrimary)
+                            Spacer()
+                            if let usage = store.quotas?.codebuddy, usage.available {
+                                Text("今日 \(RelayFormat.credits(usage.todayCredits))")
+                                    .font(.system(size: 13))
+                                    .monospacedDigit()
+                                    .foregroundStyle(Palette.textSecondary)
+                            }
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Palette.textTertiary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 } header: {
                     Text("连接")
                 }
@@ -53,6 +75,10 @@ struct SettingsView: View {
                     .pickerStyle(.segmented)
                     .listRowBackground(Color.clear)
                     .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                    .onChange(of: appearance) { _, mode in
+                        Haptics.select()
+                        mode.applyToWindows()
+                    }
 
                     Toggle(isOn: $hapticsEnabled) {
                         Label("触感反馈", systemImage: "hand.tap")
@@ -130,6 +156,9 @@ struct SettingsView: View {
             }
             .onAppear {
                 barkDraft = store.barkUrl
+            }
+            .sheet(isPresented: $showQuota) {
+                QuotaSheet()
             }
         }
         .presentationDragIndicator(.visible)

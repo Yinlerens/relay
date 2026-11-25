@@ -210,6 +210,17 @@ struct RelayAPI: Sendable {
         try await json("/api/settings", as: ServerSettings.self)
     }
 
+    /// `GET /api/quotas[?refresh=1]` — Antigravity model limits + CodeBuddy credit consumption.
+    func fetchQuotas(refresh: Bool = false) async throws -> QuotaOverview {
+        var request = authorizedRequest("/api/quotas")
+        request.timeoutInterval = 45
+        if refresh, let base = request.url, var components = URLComponents(url: base, resolvingAgainstBaseURL: false) {
+            components.queryItems = [URLQueryItem(name: "refresh", value: "1")]
+            request.url = components.url ?? base
+        }
+        return try await send(request, as: QuotaOverview.self)
+    }
+
     func updateSettings(barkUrl: String, testBark: Bool) async throws -> ServerSettings {
         try await json(
             "/api/settings",

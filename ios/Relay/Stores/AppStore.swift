@@ -42,6 +42,11 @@ final class AppStore {
     var banner: Banner? = nil
     var activeSessionId: String? = nil
 
+    // MARK: Quotas & credits
+    var quotas: QuotaOverview? = nil
+    var isLoadingQuotas = false
+    var quotaError: String? = nil
+
     // MARK: Private
     private let socket: RelaySocket
     @ObservationIgnored private var pendingDeltas: [String: PendingDelta] = [:]
@@ -199,6 +204,8 @@ final class AppStore {
             messages = [:]
             hasBootstrapped = false
             activeSessionId = nil
+            quotas = nil
+            quotaError = nil
         }
         serverURLString = ""
         token = ""
@@ -330,6 +337,24 @@ final class AppStore {
     func fetchWorkspaces() async -> [String] {
         guard let api else { return [] }
         return (try? await api.workspaces()) ?? []
+    }
+
+    // MARK: - Quotas
+
+    /// Loads Antigravity limits + CodeBuddy credit usage. `refresh` bypasses the server's 30s cache.
+    func loadQuotas(refresh: Bool = false) async {
+        guard let api, !isLoadingQuotas else { return }
+        isLoadingQuotas = true
+        defer { isLoadingQuotas = false }
+        do {
+            let overview = try await api.fetchQuotas(refresh: refresh)
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.86)) {
+                quotas = overview
+                quotaError = nil
+            }
+        } catch {
+            quotaError = error.localizedDescription
+        }
     }
 
     // MARK: - Config switching
@@ -583,6 +608,9 @@ final class AppStore {
             if activeSessionId == sid { Haptics.success() }
             if messages[sid] != nil {
                 Task { await self.reloadMessages(sid) }
+            }
+            if quotas != nil {
+                Task { await self.loadQuotas(refresh: true) }
             }
 
         case "turn_error":

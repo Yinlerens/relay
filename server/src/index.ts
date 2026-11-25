@@ -8,6 +8,7 @@ import { RelayDatabase } from "./db.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerSettingsRoutes } from "./routes/settings.js";
 import { registerUploadRoutes } from "./routes/uploads.js";
+import { registerQuotaRoutes } from "./routes/quotas.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -36,6 +37,7 @@ async function main(): Promise<void> {
   registerSessionRoutes(app, config, db, manager);
   registerUploadRoutes(app, config, db);
   registerSettingsRoutes(app, db);
+  registerQuotaRoutes(app, config);
 
   app.get("/ws", { websocket: true }, (socket) => {
     const unsubscribe = manager.subscribe((ev) => {
