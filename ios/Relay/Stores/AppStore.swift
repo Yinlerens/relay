@@ -80,6 +80,7 @@ final class AppStore {
     var isReloadingTavern = false
     var isMutatingTavern = false
     var tavernError: String? = nil
+    var tavernGenerationError: String? = nil
     var activeTavernCharacterId: Int? = nil
 
     // MARK: Private
@@ -694,6 +695,7 @@ final class AppStore {
         isReloadingTavern = false
         isMutatingTavern = false
         tavernError = nil
+        tavernGenerationError = nil
         activeTavernCharacterId = nil
         tavernConversationMemory.removeAll()
         latestChatByChar.removeAll()
@@ -935,6 +937,7 @@ final class AppStore {
         forceFull: Bool = false
     ) async {
         guard let api else { return }
+        tavernGenerationError = nil
 
         var cached: CachedTavernConversation? = nil
         if !createNew && !forceFull {
@@ -942,23 +945,29 @@ final class AppStore {
         }
 
         if let cached {
-            var baseStatus = tavernStatus ?? TavernStatus(enabled: true, ready: true)
-            baseStatus.currentCharacterId = id
-            baseStatus.currentCharacterName = cached.character?.name ?? tavernCharacter(id: id)?.name
-            baseStatus.currentChatFile = cached.chatFile
-            let hydrated = TavernChatState(
-                status: baseStatus,
-                character: cached.character ?? tavernCharacter(id: id),
-                chatFile: cached.chatFile,
-                userName: cached.userName,
-                messages: cached.messages,
-                variables: [:],
-                totalMessageCount: cached.totalMessageCount,
-                hasMore: cached.hasMore ?? ((cached.messages.first?.mesId ?? 0) > 0)
-            )
-            // Instant 0ms render from local cache with no spinner.
-            tavernState = hydrated
-            tavernVariablesJSON = cached.variablesJSON
+            let alreadyShowingSame =
+                tavernState?.character?.id == id &&
+                RelayDiskCache.normalizeChatFile(tavernState?.chatFile) == RelayDiskCache.normalizeChatFile(cached.chatFile) &&
+                tavernState?.messages == cached.messages
+            if !alreadyShowingSame {
+                var baseStatus = tavernStatus ?? TavernStatus(enabled: true, ready: true)
+                baseStatus.currentCharacterId = id
+                baseStatus.currentCharacterName = cached.character?.name ?? tavernCharacter(id: id)?.name
+                baseStatus.currentChatFile = cached.chatFile
+                let hydrated = TavernChatState(
+                    status: baseStatus,
+                    character: cached.character ?? tavernCharacter(id: id),
+                    chatFile: cached.chatFile,
+                    userName: cached.userName,
+                    messages: cached.messages,
+                    variables: [:],
+                    totalMessageCount: cached.totalMessageCount,
+                    hasMore: cached.hasMore ?? ((cached.messages.first?.mesId ?? 0) > 0)
+                )
+                // Instant 0ms render from local cache with no spinner.
+                tavernState = hydrated
+                tavernVariablesJSON = cached.variablesJSON
+            }
             isLoadingTavernChat = false
         } else {
             isLoadingTavernChat = true
@@ -995,9 +1004,7 @@ final class AppStore {
                 existing: cached,
                 isReset: createNew || forceFull
             )
-            withAnimation(.easeOut(duration: 0.2)) {
-                applyTavernState(merged, persist: true)
-            }
+            applyTavernState(merged, persist: true)
             if createNew {
                 Haptics.success()
                 Task { await self.loadTavernChats(characterId: id) }
@@ -1085,6 +1092,7 @@ final class AppStore {
         guard let api else { return false }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
+        tavernGenerationError = nil
         tavernStatus?.isGenerating = true
         tavernState?.status.isGenerating = true
         Haptics.tap(.soft)
@@ -1117,6 +1125,7 @@ final class AppStore {
 
     func regenerateTavern() async {
         guard let api else { return }
+        tavernGenerationError = nil
         tavernStatus?.isGenerating = true
         tavernState?.status.isGenerating = true
         Haptics.tap(.soft)
@@ -1132,6 +1141,7 @@ final class AppStore {
 
     func continueTavern() async {
         guard let api else { return }
+        tavernGenerationError = nil
         tavernStatus?.isGenerating = true
         tavernState?.status.isGenerating = true
         Haptics.tap(.soft)
@@ -1630,6 +1640,7 @@ final class AppStore {
 
         case "tavern_stream_delta":
             guard let p = decodePayload(WSTavernStreamDeltaPayload.self, from: data) else { return }
+            tavernGenerationError = nil
             guard var state = tavernState else {
                 tavernStatus?.isGenerating = true
                 return
@@ -1681,6 +1692,9 @@ final class AppStore {
                 if matchesChar {
                     state.status.isGenerating = stillGenerating
                     if let msg = p.message {
+                        if !msg.isUser {
+                            tavernGenerationError = nil
+                        }
                         if let idx = state.messages.lastIndex(where: { $0.mesId == msg.mesId }) {
                             state.messages[idx] = msg
                         } else {
@@ -1693,10 +1707,27 @@ final class AppStore {
                     }
                     let rawJSON = Self.extractRawVariablesJSON(from: data, nestedInState: false)
                     applyTavernState(state, rawVariablesJSON: rawJSON ?? (p.variables != nil ? state.variablesJSON : tavernVariablesJSON))
-                    if activeTavernCharacterId != nil && !stillGenerating {
+                    if activeTavernCharacterId != nil && !stillGenerating && p.message?.isUser != true {
                         Haptics.success()
                     }
                 }
+            }
+
+        case "tavern_error":
+            guard let p = decodePayload(WSTavernErrorPayload.self, from: data),
+                  !p.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            tavernStatus?.isGenerating = false
+            if var state = tavernState {
+                state.status.isGenerating = false
+                for idx in state.messages.indices where state.messages[idx].isStreaming {
+                    state.messages[idx].isStreaming = false
+                }
+                tavernState = state
+            }
+            if p.characterId == nil || activeTavernCharacterId == nil || p.characterId == activeTavernCharacterId {
+                tavernGenerationError = p.message
+                Haptics.error()
+                showBanner(p.message, isError: true)
             }
 
         case "tavern_chat_updated":

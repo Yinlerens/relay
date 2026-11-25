@@ -7,6 +7,7 @@ import { afterEach, describe, it } from "node:test";
 import { createRelayServer, type RelayServerInstance } from "../src/app.js";
 import type { AppConfig } from "../src/config.js";
 import { TavernAuthStore } from "../src/tavern/auth-store.js";
+import { formatTavernHttpError } from "../src/tavern/bridge.js";
 import {
   applyIncrementalChatDiff,
   buildExtractChatMessagesScript,
@@ -1061,5 +1062,31 @@ describe("Tavern Bridge Utilities & Routes", () => {
     assert.equal(readCharacterChatsDiskSnapshot(null, null, "TestChar.png"), null);
     assert.equal(readCharacterChatsDiskSnapshot(tmpDir, null, ""), null);
     assert.equal(readCharacterChatsDiskSnapshot(tmpDir, null, "NonExistent.png"), null);
+  });
+
+  it("formats upstream HTTP generation errors cleanly for Vertex 429, 502, and 403", () => {
+    const vertex429 = JSON.stringify({
+      error: {
+        code: 429,
+        message: "Resource exhausted. Please try again later.",
+        status: "RESOURCE_EXHAUSTED",
+      },
+    });
+    assert.equal(
+      formatTavernHttpError(429, vertex429),
+      "上游接口限流 (429)：Resource exhausted. Please try again later."
+    );
+    assert.equal(
+      formatTavernHttpError(429, ""),
+      "上游接口限流 (429)：资源暂时耗尽，请稍后重试"
+    );
+    assert.equal(
+      formatTavernHttpError(502, "Bad Gateway from upstream"),
+      "上游接口服务异常 (502)：Bad Gateway from upstream"
+    );
+    assert.equal(
+      formatTavernHttpError(403, JSON.stringify({ error: "Forbidden" })),
+      "上游接口鉴权或权限拒绝 (403)：Forbidden"
+    );
   });
 });

@@ -538,3 +538,20 @@ struct WSTavernMessageFinalizedPayload: Decodable, Sendable {
 struct WSTavernChatUpdatedPayload: Decodable, Sendable {
     var state: TavernChatState?
 }
+
+struct WSTavernErrorPayload: Decodable, Sendable {
+    var characterId: Int?
+    var chatFile: String?
+    var code: Int?
+    var message: String
+
+    enum CodingKeys: String, CodingKey { case characterId, chatFile, code, message }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        characterId = c.flexOptionalInt(.characterId)
+        chatFile = c.flexOptionalString(.chatFile)
+        code = c.flexOptionalInt(.code)
+        message = c.flexString(.message)
+    }
+}

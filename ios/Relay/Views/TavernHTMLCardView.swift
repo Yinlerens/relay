@@ -25,13 +25,34 @@ final class TavernHTMLHeightCache {
         }
     }
 
+    static func baseKey(blockId: String, renderedHash: String) -> String {
+        "\(blockId)|\(renderedHash)"
+    }
+
     func height(for key: String) -> CGFloat? {
         heights[key]
     }
 
-    func store(_ height: CGFloat, for key: String) {
-        if let existing = heights[key], abs(existing - height) < 1 { return }
+    func initialHeight(blockId: String, renderedHash: String, estimatedHeight: Double?, isIframe: Bool) -> CGFloat {
+        if let cached = heights[Self.baseKey(blockId: blockId, renderedHash: renderedHash)] {
+            return cached
+        }
+        if let est = estimatedHeight, est.isFinite, est > 20 {
+            return min(max(CGFloat(est), 40), 2400)
+        }
+        return isIframe ? 180 : 96
+    }
+
+    func store(_ height: CGFloat, for key: String, fallbackKey: String? = nil) {
+        let existingMain = heights[key]
+        let existingFallback = fallbackKey.flatMap { heights[$0] }
+        let mainUnchanged = existingMain != nil && abs(existingMain! - height) < 1
+        let fallbackUnchanged = fallbackKey == nil || (existingFallback != nil && abs(existingFallback! - height) < 1)
+        if mainUnchanged && fallbackUnchanged { return }
         heights[key] = height
+        if let fallbackKey, !fallbackKey.isEmpty {
+            heights[fallbackKey] = height
+        }
         if heights.count > 1600 {
             let overflow = heights.count - 1200
             for k in heights.keys.prefix(overflow) {
@@ -95,7 +116,39 @@ struct TavernHTMLCardView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.openURL) private var openURL
-    @State private var measuredHeight: CGFloat = 120
+    @State private var measuredHeight: CGFloat
+
+    init(
+        blockId: String,
+        renderedHash: String,
+        html: String,
+        estimatedHeight: Double?,
+        variablesJSON: String,
+        mvuDataJSON: String,
+        isIframe: Bool = false,
+        onSlash: @escaping (String) -> Void,
+        onSend: @escaping (String) -> Void,
+        onFillDraft: @escaping (String) -> Void
+    ) {
+        self.blockId = blockId
+        self.renderedHash = renderedHash
+        self.html = html
+        self.estimatedHeight = estimatedHeight
+        self.variablesJSON = variablesJSON
+        self.mvuDataJSON = mvuDataJSON
+        self.isIframe = isIframe
+        self.onSlash = onSlash
+        self.onSend = onSend
+        self.onFillDraft = onFillDraft
+        _measuredHeight = State(
+            initialValue: TavernHTMLHeightCache.shared.initialHeight(
+                blockId: blockId,
+                renderedHash: renderedHash,
+                estimatedHeight: estimatedHeight,
+                isIframe: isIframe
+            )
+        )
+    }
 
     private var cacheKey: String {
         "\(blockId)|\(renderedHash)|\(colorScheme == .dark ? "d" : "l")"
@@ -124,7 +177,11 @@ struct TavernHTMLCardView: View {
                     openURL: openURL,
                     onHeightChange: { newHeight in
                         let clamped = min(max(newHeight, 32), 4000)
-                        TavernHTMLHeightCache.shared.store(clamped, for: cacheKey)
+                        TavernHTMLHeightCache.shared.store(
+                            clamped,
+                            for: cacheKey,
+                            fallbackKey: TavernHTMLHeightCache.baseKey(blockId: blockId, renderedHash: renderedHash)
+                        )
                         if abs(clamped - measuredHeight) >= 2 {
                             measuredHeight = clamped
                         }
@@ -140,7 +197,10 @@ struct TavernHTMLCardView: View {
         }
         .onAppear {
             TavernHTMLHeightCache.shared.hydrateIfNeeded()
-            measuredHeight = initialHeight
+            if let schemeCached = TavernHTMLHeightCache.shared.height(for: cacheKey),
+               abs(schemeCached - measuredHeight) >= 2 {
+                measuredHeight = schemeCached
+            }
         }
         .onChange(of: cacheKey) { _, _ in
             measuredHeight = initialHeight

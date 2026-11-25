@@ -31,6 +31,12 @@ interface PwCookie {
   value: string;
 }
 
+interface PwResponse {
+  url(): string;
+  status(): number;
+  text(): Promise<string>;
+}
+
 interface PwPage {
   url(): string;
   goto(url: string, opts?: { waitUntil?: string; timeout?: number }): Promise<unknown>;
@@ -79,6 +85,47 @@ function parseTimestampToMs(raw: unknown): number {
   return 0;
 }
 
+export function formatTavernHttpError(status: number, rawBody: string): string {
+  let detail = "";
+  const trimmed = String(rawBody || "").trim();
+  if (trimmed) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      const errField = parsed?.error;
+      if (errField && typeof errField === "object") {
+        const msg = (errField as Record<string, unknown>).message;
+        if (typeof msg === "string" && msg.trim()) {
+          detail = msg.trim();
+        }
+      } else if (typeof errField === "string" && errField.trim()) {
+        detail = errField.trim();
+      }
+      if (!detail && typeof parsed?.message === "string" && parsed.message.trim()) {
+        detail = parsed.message.trim();
+      }
+    } catch {
+      // Plain text or HTML error response
+    }
+    if (!detail) {
+      detail = trimmed.replace(/<[^>]*>/g, " ");
+    }
+    detail = detail.replace(/\s+/g, " ").trim().slice(0, 180);
+  }
+
+  if (status === 429) {
+    return detail
+      ? `上游接口限流 (429)：${detail}`
+      : "上游接口限流 (429)：资源暂时耗尽，请稍后重试";
+  }
+  if (status === 401 || status === 403) {
+    return `上游接口鉴权或权限拒绝 (${status})${detail ? `：${detail}` : ""}`;
+  }
+  if (status >= 500) {
+    return `上游接口服务异常 (${status})${detail ? `：${detail}` : ""}`;
+  }
+  return `生成请求失败 (${status})${detail ? `：${detail}` : ""}`;
+}
+
 export class TavernBridge implements TavernBridgeLike {
   private readonly authStore: TavernAuthStore;
   private context: PwBrowserContext | null = null;
@@ -116,6 +163,9 @@ export class TavernBridge implements TavernBridgeLike {
   private postLocalSnapshotTimer: NodeJS.Timeout | null = null;
   private externalSyncPendingSig = "";
   private externalSyncInFlight = false;
+  private responseListenerPage: PwPage | null = null;
+  private lastErrorEmitAt = 0;
+  private lastErrorEmitKey = "";
 
   constructor(
     private readonly config: AppConfig,
@@ -147,6 +197,36 @@ export class TavernBridge implements TavernBridgeLike {
   private emitStatus(): void {
     this.sessionManager.emitExternal("tavern_status", "tavern", {
       status: this.buildStatus(),
+    });
+  }
+
+  private emitTavernError(message: string, statusCode?: number): void {
+    const clean = message.replace(/\s+/g, " ").trim().slice(0, 280);
+    if (!clean || this.disposed) return;
+
+    const now = Date.now();
+    if (
+      now - this.lastErrorEmitAt < 2500 &&
+      (clean === this.lastErrorEmitKey || (!statusCode && this.lastErrorEmitKey.includes("(")))
+    ) {
+      return;
+    }
+    this.lastErrorEmitAt = now;
+    this.lastErrorEmitKey = clean;
+
+    if (this.isGenerating) {
+      this.stopStreamPolling();
+      this.isGenerating = false;
+      this.sawLiveGenerating = false;
+      this.generationStartedAt = 0;
+      this.emitStatus();
+    }
+
+    this.sessionManager.emitExternal("tavern_error", "tavern", {
+      characterId: this.currentCharacterId,
+      chatFile: this.currentChatFile,
+      code: statusCode ?? null,
+      message: clean,
     });
   }
 
@@ -226,6 +306,30 @@ export class TavernBridge implements TavernBridgeLike {
 
     const existingPages = this.context.pages().filter((p) => !p.isClosed());
     this.page = existingPages[0] ?? (await this.context.newPage());
+
+    if (this.responseListenerPage !== this.page) {
+      this.responseListenerPage = this.page;
+      this.page.on("response", (rawRes: unknown) => {
+        const res = rawRes as PwResponse | undefined;
+        if (!res || typeof res.status !== "function" || typeof res.url !== "function") return;
+        const status = res.status();
+        if (status < 400) return;
+        const url = res.url();
+        if (
+          !/\/api\/backends\/[^/]+\/generate\b|\/api\/(?:google|openai|anthropic|claude|openrouter)\/|\/generate\b/i.test(
+            url
+          )
+        ) {
+          return;
+        }
+        void res
+          .text()
+          .catch(() => "")
+          .then((body) => {
+            this.emitTavernError(formatTavernHttpError(status, body), status);
+          });
+      });
+    }
 
     try {
       await this.page.exposeFunction("__relayTavernEvent", (name: unknown, payload: unknown) => {
@@ -467,6 +571,38 @@ export class TavernBridge implements TavernBridgeLike {
       bind("CHARACTER_MESSAGE_RENDERED", "character_message_rendered", "CHARACTER_MESSAGE_RENDERED");
       bind("MESSAGE_SWIPED", "message_swiped", "MESSAGE_SWIPED");
       bind("CHAT_CHANGED", "chat_changed", "CHAT_CHANGED");
+
+      const reportToastError = (node) => {
+        if (!node || node.nodeType !== 1) return;
+        const targets = [];
+        if (node.matches && node.matches(".toast-error")) targets.push(node);
+        if (node.querySelectorAll) {
+          node.querySelectorAll(".toast-error").forEach((el) => targets.push(el));
+        }
+        for (const toast of targets) {
+          const title = (toast.querySelector(".toast-title")?.textContent || "").trim();
+          const body = (toast.querySelector(".toast-message")?.textContent || "").trim();
+          const combined = [title, body].filter(Boolean).join("：") || (toast.textContent || "").trim();
+          if (combined) emit("TOAST_ERROR", { message: combined });
+        }
+      };
+      if (typeof MutationObserver !== "undefined" && document.body) {
+        const toastObserver = new MutationObserver((mutations) => {
+          for (const m of mutations) {
+            for (const added of m.addedNodes) {
+              if (added && added.nodeType === 1) {
+                const inToast =
+                  (added.closest && added.closest("#toast-container")) ||
+                  (added.id === "toast-container") ||
+                  (added.classList && added.classList.contains("toast-error")) ||
+                  (added.querySelector && added.querySelector(".toast-error"));
+                if (inToast) reportToastError(added);
+              }
+            }
+          }
+        });
+        toastObserver.observe(document.body, { childList: true, subtree: true });
+      }
     })()`);
   }
 
@@ -903,6 +1039,14 @@ export class TavernBridge implements TavernBridgeLike {
       case "CHAT_CHANGED": {
         if (!this.isGenerating) {
           this.scheduleRenderRefresh();
+        }
+        break;
+      }
+
+      case "TOAST_ERROR": {
+        const msg = typeof payloadObj?.message === "string" ? payloadObj.message : "";
+        if (msg) {
+          this.emitTavernError(msg);
         }
         break;
       }
@@ -1515,6 +1659,14 @@ export class TavernBridge implements TavernBridgeLike {
         btn.click();
       }, clean);
 
+      this.clearFinalizationTimers();
+      this.isGenerating = true;
+      this.generationStartedAt = Date.now();
+      this.sawLiveGenerating = false;
+      this.lastDeltaKey = "";
+      this.emitStatus();
+      this.startStreamPolling();
+
       await new Promise((r) => setTimeout(r, 180));
       const state = await this.extractChatState();
       this.markLocalMutationAndSnapshot();
@@ -1572,6 +1724,13 @@ export class TavernBridge implements TavernBridgeLike {
         const btn = document.querySelector("#option_regenerate");
         if (btn) btn.click();
       })()`);
+      this.clearFinalizationTimers();
+      this.isGenerating = true;
+      this.generationStartedAt = Date.now();
+      this.sawLiveGenerating = false;
+      this.lastDeltaKey = "";
+      this.emitStatus();
+      this.startStreamPolling();
       return { ok: true };
     });
   }
@@ -1593,6 +1752,13 @@ export class TavernBridge implements TavernBridgeLike {
         const btn = document.querySelector("#option_continue");
         if (btn) btn.click();
       })()`);
+      this.clearFinalizationTimers();
+      this.isGenerating = true;
+      this.generationStartedAt = Date.now();
+      this.sawLiveGenerating = false;
+      this.lastDeltaKey = "";
+      this.emitStatus();
+      this.startStreamPolling();
       return { ok: true };
     });
   }

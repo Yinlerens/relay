@@ -12,6 +12,7 @@ struct ChatView: View {
     @State private var showQuota = false
     @State private var showSwarm = false
     @State private var isAtBottom = true
+    @State private var userInteractedWithScroll = false
     @State private var lightbox: Attachment?
     @Namespace private var imageZoomNamespace
 
@@ -69,10 +70,15 @@ struct ChatView: View {
                 .padding(.bottom, 8)
                 .frame(maxWidth: 780)
                 .frame(maxWidth: .infinity)
+                .scrollTargetLayout()
             }
-            .defaultScrollAnchor(.bottom)
             .scrollEdgeEffectStyle(.soft, for: .all)
             .scrollDismissesKeyboard(.interactively)
+            .onScrollPhaseChange { _, phase in
+                if phase == .interacting {
+                    userInteractedWithScroll = true
+                }
+            }
             .onScrollGeometryChange(for: Bool.self) { geo in
                 geo.visibleRect.maxY >= geo.contentSize.height - 90
             } action: { _, atBottom in
@@ -80,6 +86,32 @@ struct ChatView: View {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                         isAtBottom = atBottom
                     }
+                }
+            }
+            .onAppear {
+                userInteractedWithScroll = false
+                isAtBottom = true
+                if !messages.isEmpty {
+                    if let lastId = messages.last?.id {
+                        proxy.scrollTo(lastId, anchor: .bottom)
+                    }
+                    proxy.scrollTo(bottomID, anchor: .bottom)
+                }
+            }
+            .task(id: sessionId) {
+                for delayMs in [0, 120] {
+                    if delayMs > 0 {
+                        try? await Task.sleep(for: .milliseconds(delayMs))
+                    } else {
+                        await Task.yield()
+                    }
+                    guard !Task.isCancelled, !userInteractedWithScroll, isAtBottom, !messages.isEmpty else {
+                        return
+                    }
+                    if let lastId = messages.last?.id {
+                        proxy.scrollTo(lastId, anchor: .bottom)
+                    }
+                    proxy.scrollTo(bottomID, anchor: .bottom)
                 }
             }
             .onChange(of: messages.count) { oldCount, newCount in

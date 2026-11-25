@@ -64,6 +64,7 @@ struct TavernChatView: View {
     @State private var draft = ""
     @State private var isSending = false
     @State private var isAtBottom = true
+    @State private var userInteractedWithScroll = false
     @State private var showHistory = false
     @State private var editingMessage: TavernMessage? = nil
     @State private var deletingMessage: TavernMessage? = nil
@@ -165,6 +166,17 @@ struct TavernChatView: View {
                         .id(message.mesId)
                     }
 
+                    if isGenerating && (messages.last?.isUser == true || messages.last?.isStreaming != true) {
+                        pendingAssistantRow
+                            .transition(.opacity)
+                    } else if let genErr = store.tavernGenerationError, !genErr.isEmpty {
+                        generationErrorCard(genErr)
+                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    } else if !isGenerating && messages.last?.isUser == true {
+                        orphanRetryRow
+                            .transition(.opacity)
+                    }
+
                     Color.clear
                         .frame(height: 1)
                         .id(bottomID)
@@ -174,10 +186,15 @@ struct TavernChatView: View {
                 .padding(.bottom, 10)
                 .frame(maxWidth: 780)
                 .frame(maxWidth: .infinity)
+                .scrollTargetLayout()
             }
-            .defaultScrollAnchor(.bottom)
             .scrollEdgeEffectStyle(.soft, for: .all)
             .scrollDismissesKeyboard(.interactively)
+            .onScrollPhaseChange { _, phase in
+                if phase == .interacting {
+                    userInteractedWithScroll = true
+                }
+            }
             .onScrollGeometryChange(for: Bool.self) { geo in
                 geo.visibleRect.maxY >= geo.contentSize.height - 90
             } action: { _, atBottom in
@@ -187,14 +204,38 @@ struct TavernChatView: View {
                     }
                 }
             }
-            .onChange(of: messages.last?.mesId) { oldLast, newLast in
-                guard let newLast else { return }
-                if oldLast == nil {
-                    proxy.scrollTo(bottomID, anchor: .bottom)
-                } else if let oldLast, newLast > oldLast {
-                    withAnimation(.spring(response: 0.45, dampingFraction: 0.9)) {
-                        proxy.scrollTo(bottomID, anchor: .bottom)
+            .onAppear {
+                userInteractedWithScroll = false
+                isAtBottom = true
+                if !messages.isEmpty {
+                    scrollToBottom(proxy)
+                }
+            }
+            .task(id: characterId) {
+                for delayMs in [0, 120, 220] {
+                    if delayMs > 0 {
+                        try? await Task.sleep(for: .milliseconds(delayMs))
+                    } else {
+                        await Task.yield()
                     }
+                    guard !Task.isCancelled, !userInteractedWithScroll, isAtBottom, !messages.isEmpty else {
+                        return
+                    }
+                    scrollToBottom(proxy)
+                }
+            }
+            .onChange(of: messages.last?.mesId) { oldLast, newLast in
+                guard newLast != nil else { return }
+                scrollToBottom(proxy, animated: oldLast != nil)
+            }
+            .onChange(of: isGenerating) { _, active in
+                if active && isAtBottom {
+                    scrollToBottom(proxy, animated: true)
+                }
+            }
+            .onChange(of: store.tavernGenerationError) { _, err in
+                if err != nil && isAtBottom {
+                    scrollToBottom(proxy, animated: true)
                 }
             }
             .onChange(of: streamSignature) { _, _ in
@@ -206,9 +247,7 @@ struct TavernChatView: View {
                 if !isAtBottom && !messages.isEmpty {
                     ScrollToBottomPill(isStreaming: isGenerating, tint: TavernTheme.tint) {
                         Haptics.tap(.soft)
-                        withAnimation(.spring(response: 0.5, dampingFraction: 0.88)) {
-                            proxy.scrollTo(bottomID, anchor: .bottom)
-                        }
+                        scrollToBottom(proxy, animated: true)
                     }
                     .padding(.bottom, 12)
                     .transition(.scale(scale: 0.8).combined(with: .opacity))
@@ -344,6 +383,121 @@ struct TavernChatView: View {
     private var streamSignature: Int {
         guard let last = messages.last else { return 0 }
         return last.rawText.utf8.count &+ last.reasoning.utf8.count &* 31 &+ last.renderedHash.hashValue
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = false) {
+        let perform = {
+            if let lastMesId = messages.last?.mesId,
+               !isGenerating,
+               (store.tavernGenerationError ?? "").isEmpty,
+               messages.last?.isUser != true {
+                proxy.scrollTo(lastMesId, anchor: .bottom)
+            }
+            proxy.scrollTo(bottomID, anchor: .bottom)
+        }
+        if animated {
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.9), perform)
+        } else {
+            perform()
+        }
+    }
+
+    private var pendingAssistantRow: some View {
+        let avatar = messages.last(where: { !$0.isUser && !$0.isSystem })?.avatarUrl ?? character?.avatarUrl
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 9) {
+                TavernAssetImageView(pathOrUrl: avatar, fallbackText: characterName)
+                    .frame(width: 28, height: 28)
+                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .stroke(Palette.hairline, lineWidth: 0.6)
+                    )
+                Text(characterName)
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(Palette.textSecondary)
+                Spacer(minLength: 4)
+                PulseDot(color: TavernTheme.tint, size: 5)
+            }
+            HStack(spacing: 8) {
+                TypingDots(color: TavernTheme.tint)
+                Text("正在等待回复…")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Palette.textSecondary)
+            }
+            .padding(.vertical, 4)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func generationErrorCard(_ errorText: String) -> some View {
+        HStack(alignment: .top, spacing: 11) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Palette.danger)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 10) {
+                Text(errorText)
+                    .font(.system(size: 13.5, weight: .medium))
+                    .foregroundStyle(Palette.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    Haptics.tap(.medium)
+                    Task { await store.regenerateTavern() }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 11.5, weight: .bold))
+                        Text("重试生成")
+                    }
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(TavernTheme.gradient))
+                }
+                .buttonStyle(.pressable)
+            }
+            Spacer(minLength: 4)
+            Button {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    store.tavernGenerationError = nil
+                }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Palette.textTertiary)
+                    .padding(6)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("关闭错误提示")
+        }
+        .padding(14)
+        .cardSurface(radius: 16)
+    }
+
+    private var orphanRetryRow: some View {
+        HStack {
+            Spacer()
+            Button {
+                Haptics.tap(.soft)
+                Task { await store.regenerateTavern() }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("尚未收到回复 · 点击重新生成")
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Palette.textSecondary)
+                .padding(.horizontal, 11)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(Palette.fieldFill))
+                .overlay(Capsule().stroke(Palette.hairline, lineWidth: 0.6))
+            }
+            .buttonStyle(.pressable)
+        }
     }
 
     private var loadOlderButton: some View {
