@@ -868,6 +868,7 @@ struct SwarmBoardCard: View {
 
 // MARK: - @mention AttributedString highlighter
 
+@MainActor
 enum MentionHighlighter {
     private static let regex = #/@[A-Za-z0-9_-]+/#
 

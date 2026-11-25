@@ -3,6 +3,7 @@ import UIKit
 
 // MARK: - Streaming <think> / <thought> splitter
 
+@MainActor
 enum TavernTextSplitter {
     private static let closedTagRegex = #/<(think|thought|thinking)>([\s\S]*?)</\1>/#.ignoresCase()
     private static let openTagRegex = #/<(?:think|thought|thinking)>([\s\S]*)$/#.ignoresCase()

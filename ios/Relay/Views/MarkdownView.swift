@@ -459,6 +459,7 @@ struct CodeBlockCard: View {
 
 // MARK: - Syntax highlighting (linear, Swift Regex-based, dependency-free)
 
+@MainActor
 enum SyntaxHighlighter {
     private static let keywordRegex = #/\b(?:func|let|var|const|if|else|for|while|return|import|from|class|struct|enum|def|fn|pub|async|await|try|catch|throw|throws|new|true|false|nil|null|None|True|False|self|this|export|default|interface|type|public|private|protected|static|extends|implements|in|of|guard|switch|case|break|continue|do|package|use|mut|impl|match|lambda|yield|with|as|is|not|and|or|elif|except|finally|raise|pass|function|echo|then|fi|done|esac|select|where|go|defer|chan|map|protocol|extension|init|override|final|some|any)\b/#
     private static let numberRegex = #/\b(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?)\b/#

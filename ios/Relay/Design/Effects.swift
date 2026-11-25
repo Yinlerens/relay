@@ -10,6 +10,7 @@ struct Shimmer: ViewModifier {
 
     func body(content: Content) -> some View {
         if active {
+            let isSweeping = sweeping
             content
                 .overlay {
                     LinearGradient(
@@ -18,7 +19,7 @@ struct Shimmer: ViewModifier {
                         endPoint: .trailing
                     )
                     .visualEffect { view, proxy in
-                        view.offset(x: sweeping ? proxy.size.width : -proxy.size.width)
+                        view.offset(x: isSweeping ? proxy.size.width : -proxy.size.width)
                     }
                     .allowsHitTesting(false)
                 }
