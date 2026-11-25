@@ -2,21 +2,64 @@ import SwiftUI
 import UIKit
 import WebKit
 
-// MARK: - Height cache to prevent scroll jitter
+// MARK: - Persistent height cache to prevent scroll jitter across launches
 
 @MainActor
 final class TavernHTMLHeightCache {
     static let shared = TavernHTMLHeightCache()
     private var heights: [String: CGFloat] = [:]
+    private var hasHydrated = false
+    private var saveTask: Task<Void, Never>? = nil
 
     private init() {}
+
+    func hydrateIfNeeded() {
+        guard !hasHydrated else { return }
+        hasHydrated = true
+        Task { [weak self] in
+            let saved = await RelayDiskCache.shared.loadHTMLHeights()
+            guard let self, !saved.isEmpty else { return }
+            for (k, v) in saved where self.heights[k] == nil && v.isFinite && v >= 32 {
+                self.heights[k] = CGFloat(v)
+            }
+        }
+    }
 
     func height(for key: String) -> CGFloat? {
         heights[key]
     }
 
     func store(_ height: CGFloat, for key: String) {
+        if let existing = heights[key], abs(existing - height) < 1 { return }
         heights[key] = height
+        if heights.count > 1600 {
+            let overflow = heights.count - 1200
+            for k in heights.keys.prefix(overflow) {
+                heights.removeValue(forKey: k)
+            }
+        }
+        scheduleSave()
+    }
+
+    func clear() {
+        saveTask?.cancel()
+        saveTask = nil
+        heights.removeAll()
+        hasHydrated = false
+    }
+
+    private func scheduleSave() {
+        saveTask?.cancel()
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard let self, !Task.isCancelled else { return }
+            var snapshot: [String: Double] = [:]
+            snapshot.reserveCapacity(self.heights.count)
+            for (k, v) in self.heights {
+                snapshot[k] = Double(v)
+            }
+            await RelayDiskCache.shared.saveHTMLHeights(snapshot)
+        }
     }
 }
 
@@ -93,6 +136,7 @@ struct TavernHTMLCardView: View {
             }
         }
         .onAppear {
+            TavernHTMLHeightCache.shared.hydrateIfNeeded()
             measuredHeight = initialHeight
         }
         .onChange(of: cacheKey) { _, _ in

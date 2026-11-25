@@ -37,6 +37,49 @@ function inferMimeType(assetPath: string): string {
   }
 }
 
+const LONG_CACHE_STATIC_PREFIXES = [
+  "/scripts/",
+  "/css/",
+  "/assets/",
+  "/img/",
+  "/characters/",
+  "/user/",
+  "/backgrounds/",
+  "/User Avatars/",
+  "/User%20Avatars/",
+  "/default-expressions/",
+  "/uploads/",
+];
+
+function sanitizeKnownHashes(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  const out: Record<string, string> = {};
+  let count = 0;
+  for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (count >= 300) break;
+    if (!/^\d+$/.test(key)) continue;
+    if (typeof val !== "string") continue;
+    const cleanVal = val.trim();
+    if (!cleanVal || cleanVal.length > 64) continue;
+    out[key] = cleanVal;
+    count++;
+  }
+  return count > 0 ? out : undefined;
+}
+
+function resolveAssetCacheSeconds(safePath: string): number {
+  const pathname = safePath.split("?")[0];
+  if (pathname === "/thumbnail") {
+    return 1800;
+  }
+  if (LONG_CACHE_STATIC_PREFIXES.some((prefix) => pathname.startsWith(prefix))) {
+    return 604800;
+  }
+  return 3600;
+}
+
 export function registerTavernRoutes(
   app: FastifyInstance,
   config: AppConfig,
@@ -74,16 +117,29 @@ export function registerTavernRoutes(
   });
 
   app.post<{
-    Body: { characterId?: number; chatFile?: string; createNew?: boolean };
+    Body: {
+      characterId?: number;
+      chatFile?: string;
+      createNew?: boolean;
+      knownChatFile?: string;
+      knownHashes?: Record<string, unknown>;
+    };
   }>("/api/tavern/select", async (req, reply) => {
     const characterId = req.body?.characterId;
     if (typeof characterId !== "number" || !Number.isFinite(characterId) || characterId < 0) {
       return reply.code(400).send({ error: "characterId is required" });
     }
+    const knownChatFile =
+      typeof req.body?.knownChatFile === "string" && req.body.knownChatFile.trim()
+        ? req.body.knownChatFile.trim().slice(0, 300)
+        : undefined;
+    const knownHashes = sanitizeKnownHashes(req.body?.knownHashes);
     return bridge.selectCharacter({
       characterId: Math.trunc(characterId),
       chatFile: req.body?.chatFile,
       createNew: Boolean(req.body?.createNew),
+      knownChatFile,
+      knownHashes,
     });
   });
 
@@ -207,7 +263,7 @@ export function registerTavernRoutes(
     } else if (cleanPath.endsWith(".css")) {
       contentType = "text/css; charset=utf-8";
     }
-    const cacheSeconds = safePath.startsWith("/thumbnail") ? 300 : 3600;
+    const cacheSeconds = resolveAssetCacheSeconds(safePath);
     const buf = Buffer.from(await upstream.arrayBuffer());
 
     reply.header("Content-Type", contentType);

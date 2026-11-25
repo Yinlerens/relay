@@ -259,7 +259,12 @@ enum RelayFormat {
     }
 
     static func bytes(_ count: Int) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .file)
+        bytes(Int64(count))
+    }
+
+    static func bytes(_ count: Int64) -> String {
+        guard count > 0 else { return "0 KB" }
+        return ByteCountFormatter.string(fromByteCount: count, countStyle: .file)
     }
 
     static func relative(_ date: Date) -> String {

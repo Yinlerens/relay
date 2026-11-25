@@ -8,6 +8,7 @@ import { createRelayServer, type RelayServerInstance } from "../src/app.js";
 import type { AppConfig } from "../src/config.js";
 import { TavernAuthStore } from "../src/tavern/auth-store.js";
 import {
+  applyIncrementalChatDiff,
   buildExtractChatMessagesScript,
   buildFallbackMarkdownMessage,
   buildTavernAvatarUrl,
@@ -24,6 +25,7 @@ import type {
   TavernChatState,
   TavernCurrentOptions,
   TavernMessage,
+  TavernSelectInput,
   TavernStatus,
   TavernSwipeDirection,
 } from "../src/tavern/types.js";
@@ -31,8 +33,10 @@ import type {
 function createMockTavernBridge(): TavernBridgeLike & {
   calls: string[];
   state: TavernChatState;
+  lastSelectInput: TavernSelectInput | null;
 } {
   const calls: string[] = [];
+  let lastSelectInput: TavernSelectInput | null = null;
   const character: TavernCharacter = {
     id: 0,
     name: "Seraphina",
@@ -97,6 +101,12 @@ function createMockTavernBridge(): TavernBridgeLike & {
   return {
     calls,
     state,
+    get lastSelectInput() {
+      return lastSelectInput;
+    },
+    set lastSelectInput(v: TavernSelectInput | null) {
+      lastSelectInput = v;
+    },
     async getStatus() {
       calls.push("getStatus");
       return { status: state.status };
@@ -121,11 +131,15 @@ function createMockTavernBridge(): TavernBridgeLike & {
       return { characterId, chats };
     },
     async selectCharacter(input) {
+      lastSelectInput = input;
       calls.push(`select:${input.characterId}:${input.chatFile || ""}:${Boolean(input.createNew)}`);
       state.status.currentCharacterId = input.characterId;
       state.chatFile = input.createNew ? "new-chat.jsonl" : input.chatFile || character.chat;
       state.status.currentChatFile = state.chatFile;
-      return { state };
+      const diffed = input.createNew
+        ? state
+        : applyIncrementalChatDiff(state, input.knownChatFile, input.knownHashes);
+      return { state: diffed };
     },
     async getCurrentState(options?: TavernCurrentOptions) {
       calls.push(`getCurrentState:${options?.limit ?? ""}:${options?.beforeMesId ?? ""}`);
@@ -479,19 +493,20 @@ describe("Tavern Bridge Utilities & Routes", () => {
     );
     assert.equal(assetRes.status, 200);
     assert.equal(assetRes.headers.get("content-type"), "image/png");
-    assert.equal(assetRes.headers.get("cache-control"), "private, max-age=300");
+    assert.equal(assetRes.headers.get("cache-control"), "private, max-age=1800");
     assert.equal(capturedCookie, "session-cookie=st_demo_cookie_value");
     assert.equal(capturedUrl, "/thumbnail?type=avatar&file=Seraphina.png");
     const assetBuf = Buffer.from(await assetRes.arrayBuffer());
     assert.deepEqual(assetBuf, pngBytes);
 
-    // JS & CSS MIME enforcement on /api/tavern/asset
+    // JS & CSS MIME enforcement + 7-day static Cache-Control on /api/tavern/asset
     const jsRes = await fetch(
       `${baseUrl}/api/tavern/asset?path=${encodeURIComponent("/scripts/extensions/third-party/JS-Slash-Runner/lib/tailwindcss.min.js")}`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
     assert.equal(jsRes.status, 200);
     assert.equal(jsRes.headers.get("content-type"), "application/javascript; charset=utf-8");
+    assert.equal(jsRes.headers.get("cache-control"), "private, max-age=604800");
 
     const cssRes = await fetch(
       `${baseUrl}/api/tavern/asset?path=${encodeURIComponent("/css/card.css")}`,
@@ -499,6 +514,7 @@ describe("Tavern Bridge Utilities & Routes", () => {
     );
     assert.equal(cssRes.status, 200);
     assert.equal(cssRes.headers.get("content-type"), "text/css; charset=utf-8");
+    assert.equal(cssRes.headers.get("cache-control"), "private, max-age=604800");
 
     // 3. Full Tavern REST surface
     const stRes = await api("/api/tavern/status");
@@ -531,6 +547,32 @@ describe("Tavern Bridge Utilities & Routes", () => {
     assert.equal(selectRes.status, 200);
     assert.equal(selectRes.json.state.messages.length, 3);
     assert.equal(selectRes.json.state.messages[2].reasoning, "Checking star chart");
+
+    // Incremental select forwarding + knownHashes sanitization (filters non-numeric keys & >64 char values)
+    const msg0Hash = selectRes.json.state.messages[0].renderedHash;
+    const msg1Hash = selectRes.json.state.messages[1].renderedHash;
+    const diffSelectRes = await api("/api/tavern/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        characterId: 0,
+        chatFile: "Seraphina - 2026-11-25",
+        knownChatFile: "Seraphina - 2026-11-25",
+        knownHashes: {
+          "0": msg0Hash,
+          "1": msg1Hash,
+          badKey: "abc123",
+          "2": "x".repeat(80),
+        },
+      }),
+    });
+    assert.equal(diffSelectRes.status, 200);
+    assert.deepEqual(mockBridge.lastSelectInput?.knownHashes, { "0": msg0Hash, "1": msg1Hash });
+    assert.deepEqual(diffSelectRes.json.state.unchangedMesIds, [0, 1]);
+    assert.deepEqual(
+      diffSelectRes.json.state.messages.map((m: TavernMessage) => m.mesId),
+      [2]
+    );
 
     const curRes = await api("/api/tavern/current?limit=2&before=3");
     assert.equal(curRes.status, 200);
@@ -892,5 +934,93 @@ describe("Tavern Bridge Utilities & Routes", () => {
     assert.equal(page2.totalMessageCount, 4);
     assert.equal(page2.hasMore, false);
     assert.deepEqual(page2.messages.map((m) => m.mesId), [0, 1]);
+  });
+
+  it("computes incremental chat diffs cleanly across full-hit, partial-change, chat-switch, and streaming cases", () => {
+    const m0 = buildFallbackMarkdownMessage({
+      mesId: 0,
+      name: "Seraphina",
+      isUser: false,
+      isSystem: false,
+      rawText: "Opening line.",
+    });
+    const m1 = buildFallbackMarkdownMessage({
+      mesId: 1,
+      name: "You",
+      isUser: true,
+      isSystem: false,
+      rawText: "Hello.",
+    });
+    const m2 = buildFallbackMarkdownMessage({
+      mesId: 2,
+      name: "Seraphina",
+      isUser: false,
+      isSystem: false,
+      rawText: "Latest reply.",
+    });
+
+    const baseState: TavernChatState = {
+      status: {
+        enabled: true,
+        ready: true,
+        needsLogin: false,
+        handle: "alice",
+        publicUrl: "https://st.apps.makima.sbs",
+        currentCharacterId: 0,
+        currentCharacterName: "Seraphina",
+        currentChatFile: "Seraphina - Chat A.jsonl",
+        isGenerating: false,
+        lastError: null,
+      },
+      character: null,
+      chatFile: "Seraphina - Chat A.jsonl",
+      userName: "You",
+      messages: [m0, m1, m2],
+      variables: { __mvu_latest: { stat_data: { hp: 100 } } },
+      totalMessageCount: 3,
+      hasMore: false,
+    };
+
+    // 1. Full hit (normalizing `.jsonl` suffix) -> messages: [], unchangedMesIds: [0, 1, 2]
+    const fullHit = applyIncrementalChatDiff(baseState, "Seraphina - Chat A", {
+      "0": m0.renderedHash,
+      "1": m1.renderedHash,
+      "2": m2.renderedHash,
+    });
+    assert.deepEqual(fullHit.messages, []);
+    assert.deepEqual(fullHit.unchangedMesIds, [0, 1, 2]);
+    assert.deepEqual(fullHit.variables, baseState.variables);
+    assert.equal(fullHit.totalMessageCount, 3);
+
+    // 2. Partial hit (m1 edited / m2 newly added) -> only changed/new messages returned
+    const partial = applyIncrementalChatDiff(baseState, "Seraphina - Chat A.jsonl", {
+      "0": m0.renderedHash,
+      "1": "stale-hash-00",
+    });
+    assert.deepEqual(partial.unchangedMesIds, [0]);
+    assert.deepEqual(partial.messages.map((m) => m.mesId), [1, 2]);
+
+    // 3. Different chatFile -> full state fallback without unchangedMesIds
+    const switched = applyIncrementalChatDiff(baseState, "Seraphina - Chat B.jsonl", {
+      "0": m0.renderedHash,
+      "1": m1.renderedHash,
+      "2": m2.renderedHash,
+    });
+    assert.equal(switched.unchangedMesIds, undefined);
+    assert.equal(switched.messages.length, 3);
+
+    // 4. Streaming message is NEVER skipped even if renderedHash matches knownHashes
+    const streamingState: TavernChatState = {
+      ...baseState,
+      messages: [m0, m1, { ...m2, isStreaming: true }],
+    };
+    const streamingDiff = applyIncrementalChatDiff(streamingState, "Seraphina - Chat A", {
+      "0": m0.renderedHash,
+      "1": m1.renderedHash,
+      "2": m2.renderedHash,
+    });
+    assert.deepEqual(streamingDiff.unchangedMesIds, [0, 1]);
+    assert.deepEqual(streamingDiff.messages.map((m) => m.mesId), [2]);
+    assert.equal(streamingDiff.messages[0].isStreaming, true);
   });
 });

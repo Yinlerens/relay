@@ -5,9 +5,11 @@ import type { RelayDatabase } from "../db.js";
 import { sendBarkNotification } from "../utils/bark.js";
 import { TavernAuthStore } from "./auth-store.js";
 import {
+  applyIncrementalChatDiff,
   buildExtractChatMessagesScript,
   buildTavernAvatarUrl,
   finalizeExtractedMessages,
+  normalizeChatFileName,
   type RawExtractedMessage,
 } from "./dom-extractor.js";
 import type {
@@ -18,6 +20,7 @@ import type {
   TavernCurrentOptions,
   TavernLoginUser,
   TavernMessage,
+  TavernSelectInput,
   TavernStatus,
   TavernSwipeDirection,
 } from "./types.js";
@@ -1046,41 +1049,62 @@ export class TavernBridge implements TavernBridgeLike {
     return { characterId, chats };
   }
 
-  async selectCharacter(input: {
-    characterId: number;
-    chatFile?: string;
-    createNew?: boolean;
-  }): Promise<{ state: TavernChatState }> {
+  async selectCharacter(input: TavernSelectInput): Promise<{ state: TavernChatState }> {
     return this.enqueue(async () => {
       await this.ensureInitialized();
       if (!this.ready || !this.page) {
         throw httpError(409, "Tavern is not logged in");
       }
 
-      await this.page.evaluate<void, { characterId: number; chatFile?: string; createNew?: boolean }>(
-        async ({ characterId, chatFile, createNew }) => {
-          const g = globalThis as Record<string, any>;
-          const st = g.SillyTavern;
-          const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
-          if (!ctx || !Array.isArray(ctx.characters) || !ctx.characters[characterId]) {
-            throw new Error(`Character not found: ${characterId}`);
-          }
-          await ctx.selectCharacterById(String(characterId));
-          if (createNew) {
-            await ctx.executeSlashCommandsWithOptions("/newchat");
-          } else if (chatFile && chatFile.trim()) {
-            const cleanName = chatFile.trim().replace(/\.jsonl$/i, "");
-            await ctx.openCharacterChat(cleanName);
-          }
-        },
-        input
-      );
+      await this.syncCurrentSelectionMeta();
 
-      // Give ST DOM + extensions (MVU / JS-Slash-Runner) time to render the loaded chat
-      await new Promise((r) => setTimeout(r, 350));
-      const state = await this.extractChatState();
-      this.sessionManager.emitExternal("tavern_chat_updated", "tavern", { state });
-      return { state };
+      const requestedChat = normalizeChatFileName(input.chatFile);
+      const currentChat = normalizeChatFileName(this.currentChatFile);
+      const hitFastPath =
+        !input.createNew &&
+        this.currentCharacterId === input.characterId &&
+        (!requestedChat || requestedChat === currentChat);
+
+      if (!hitFastPath) {
+        await this.page.evaluate<
+          void,
+          { characterId: number; chatFile?: string; createNew?: boolean }
+        >(
+          async ({ characterId, chatFile, createNew }) => {
+            const g = globalThis as Record<string, any>;
+            const st = g.SillyTavern;
+            const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
+            if (!ctx || !Array.isArray(ctx.characters) || !ctx.characters[characterId]) {
+              throw new Error(`Character not found: ${characterId}`);
+            }
+            await ctx.selectCharacterById(String(characterId));
+            if (createNew) {
+              await ctx.executeSlashCommandsWithOptions("/newchat");
+            } else if (chatFile && chatFile.trim()) {
+              const cleanName = chatFile.trim().replace(/\.jsonl$/i, "");
+              await ctx.openCharacterChat(cleanName);
+            }
+          },
+          {
+            characterId: input.characterId,
+            chatFile: input.chatFile,
+            createNew: input.createNew,
+          }
+        );
+
+        // Give ST DOM + extensions (MVU / JS-Slash-Runner) time to render the newly loaded chat
+        await new Promise((r) => setTimeout(r, 350));
+      }
+
+      const fullState = await this.extractChatState();
+      if (!hitFastPath) {
+        this.sessionManager.emitExternal("tavern_chat_updated", "tavern", { state: fullState });
+      }
+
+      const diffedState = input.createNew
+        ? fullState
+        : applyIncrementalChatDiff(fullState, input.knownChatFile, input.knownHashes);
+      return { state: diffedState };
     });
   }
 

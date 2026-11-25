@@ -75,6 +75,15 @@ export interface TavernChatState {
   variables: Record<string, unknown>;
   totalMessageCount?: number;
   hasMore?: boolean;
+  unchangedMesIds?: number[];
+}
+
+export interface TavernSelectInput {
+  characterId: number;
+  chatFile?: string;
+  createNew?: boolean;
+  knownChatFile?: string;
+  knownHashes?: Record<string, string>;
 }
 
 export interface TavernCurrentOptions {
@@ -90,11 +99,7 @@ export interface TavernBridgeLike {
   reload(): Promise<{ status: TavernStatus; characters: TavernCharacter[] }>;
   listCharacters(): Promise<{ status: TavernStatus; characters: TavernCharacter[] }>;
   listCharacterChats(characterId: number): Promise<{ characterId: number; chats: TavernChatFile[] }>;
-  selectCharacter(input: {
-    characterId: number;
-    chatFile?: string;
-    createNew?: boolean;
-  }): Promise<{ state: TavernChatState }>;
+  selectCharacter(input: TavernSelectInput): Promise<{ state: TavernChatState }>;
   getCurrentState(options?: TavernCurrentOptions): Promise<{ state: TavernChatState }>;
   sendMessage(text: string): Promise<{ ok: true; state: TavernChatState }>;
   stopGeneration(): Promise<{ stopped: boolean }>;

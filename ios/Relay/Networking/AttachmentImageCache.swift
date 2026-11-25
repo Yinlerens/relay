@@ -23,19 +23,33 @@ final class AttachmentImageCache {
         cache.setObject(image, forKey: id as NSString, cost: Self.cost(of: image))
     }
 
+    func clear() {
+        cache.removeAllObjects()
+        for (_, task) in inflight { task.cancel() }
+        inflight.removeAll()
+    }
+
     func image(for id: String, api: RelayAPI) async -> UIImage? {
         if let hit = cached(id) { return hit }
         if let running = inflight[id] { return await running.value }
 
-        let task = Task<UIImage?, Never> {
+        let diskKey = "att:\(id)"
+        let task = Task.detached(priority: .userInitiated) { () async -> UIImage? in
+            if let disk = await RelayDiskCache.shared.loadAsset(key: diskKey),
+               let img = UIImage(data: disk.data) {
+                return await img.byPreparingForDisplay() ?? img
+            }
             guard let data = try? await api.uploadData(id: id), let image = UIImage(data: data) else {
                 return nil
             }
+            await RelayDiskCache.shared.saveAsset(key: diskKey, data: data, mimeType: nil)
             return await image.byPreparingForDisplay() ?? image
         }
         inflight[id] = task
         let result = await task.value
-        inflight[id] = nil
+        if inflight[id] == task {
+            inflight[id] = nil
+        }
         if let result {
             store(result, for: id)
         }

@@ -348,10 +348,18 @@ struct RelayAPI: Sendable {
         return try await send(request, as: TavernChatsResponse.self)
     }
 
-    func tavernSelect(characterId: Int, chatFile: String? = nil, createNew: Bool = false) async throws -> TavernStateResponse {
+    func tavernSelect(
+        characterId: Int,
+        chatFile: String? = nil,
+        createNew: Bool = false,
+        knownChatFile: String? = nil,
+        knownHashes: [String: String]? = nil
+    ) async throws -> TavernStateResponse {
         var body: [String: Any] = ["characterId": characterId]
         if let chatFile, !chatFile.isEmpty { body["chatFile"] = chatFile }
         if createNew { body["createNew"] = true }
+        if let knownChatFile, !knownChatFile.isEmpty { body["knownChatFile"] = knownChatFile }
+        if let knownHashes, !knownHashes.isEmpty { body["knownHashes"] = knownHashes }
         var request = authorizedRequest("/api/tavern/select", method: "POST")
         request.timeoutInterval = 90
         request.httpBody = try JSONSerialization.data(withJSONObject: body)

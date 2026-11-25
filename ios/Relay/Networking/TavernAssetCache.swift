@@ -2,53 +2,109 @@ import SwiftUI
 import UIKit
 import WebKit
 
-// MARK: - Authenticated Tavern image cache
+// MARK: - Authenticated Tavern image & raw asset L1+L2 cache
+
+final class CachedRawAsset: NSObject {
+    let data: Data
+    let mimeType: String?
+
+    init(data: Data, mimeType: String?) {
+        self.data = data
+        self.mimeType = mimeType
+    }
+}
 
 @MainActor
 final class TavernAssetCache {
     static let shared = TavernAssetCache()
 
     private let cache = NSCache<NSString, UIImage>()
+    private let rawCache = NSCache<NSString, CachedRawAsset>()
     private var inflight: [String: Task<UIImage?, Never>] = [:]
+    private var inflightRaw: [String: Task<(Data, String?), Error>] = [:]
 
     private init() {
         cache.countLimit = 220
         cache.totalCostLimit = 128 * 1024 * 1024
+        rawCache.countLimit = 320
+        rawCache.totalCostLimit = 48 * 1024 * 1024
     }
 
     func cached(_ key: String) -> UIImage? {
-        cache.object(forKey: key as NSString)
+        let canonical = RelayDiskCache.normalizeAssetKey(key)
+        return cache.object(forKey: canonical as NSString)
     }
 
     func store(_ image: UIImage, for key: String) {
+        let canonical = RelayDiskCache.normalizeAssetKey(key)
         let pixels = image.size.width * image.size.height * image.scale * image.scale
-        cache.setObject(image, forKey: key as NSString, cost: Int(pixels * 4))
+        cache.setObject(image, forKey: canonical as NSString, cost: Int(pixels * 4))
     }
 
     func clear() {
         cache.removeAllObjects()
+        rawCache.removeAllObjects()
         for (_, task) in inflight { task.cancel() }
         inflight.removeAll()
+        for (_, task) in inflightRaw { task.cancel() }
+        inflightRaw.removeAll()
+    }
+
+    /// Two-tier raw asset loader (48MB memory NSCache -> RelayDiskCache -> network) with concurrent deduplication.
+    func rawAsset(for pathOrUrl: String, api: RelayAPI) async throws -> (data: Data, mimeType: String?) {
+        let trimmed = pathOrUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw RelayAPIError.invalidURL }
+        let canonical = RelayDiskCache.normalizeAssetKey(trimmed)
+
+        if let hit = rawCache.object(forKey: canonical as NSString) {
+            return (hit.data, hit.mimeType)
+        }
+        if let running = inflightRaw[canonical] {
+            let value = try await running.value
+            return (value.0, value.1)
+        }
+
+        let task = Task.detached(priority: .userInitiated) { () async throws -> (Data, String?) in
+            if let disk = await RelayDiskCache.shared.loadAsset(key: canonical) {
+                return (disk.data, disk.mimeType)
+            }
+            let fetched = try await api.tavernAssetData(pathOrRelativeUrl: trimmed)
+            await RelayDiskCache.shared.saveAsset(key: canonical, data: fetched.data, mimeType: fetched.mimeType)
+            return (fetched.data, fetched.mimeType)
+        }
+        inflightRaw[canonical] = task
+        defer {
+            if inflightRaw[canonical] == task {
+                inflightRaw[canonical] = nil
+            }
+        }
+        let result = try await task.value
+        rawCache.setObject(CachedRawAsset(data: result.0, mimeType: result.1), forKey: canonical as NSString, cost: result.0.count)
+        return (result.0, result.1)
     }
 
     func image(for pathOrUrl: String, api: RelayAPI) async -> UIImage? {
-        let key = pathOrUrl.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return nil }
-        if let hit = cached(key) { return hit }
-        if let running = inflight[key] { return await running.value }
+        let trimmed = pathOrUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let canonical = RelayDiskCache.normalizeAssetKey(trimmed)
 
-        let task = Task<UIImage?, Never> {
-            guard let (data, _) = try? await api.tavernAssetData(pathOrRelativeUrl: key),
+        if let hit = cache.object(forKey: canonical as NSString) { return hit }
+        if let running = inflight[canonical] { return await running.value }
+
+        let task = Task.detached(priority: .userInitiated) { () async -> UIImage? in
+            guard let (data, _) = try? await TavernAssetCache.shared.rawAsset(for: trimmed, api: api),
                   let decoded = UIImage(data: data) else {
                 return nil
             }
             return await decoded.byPreparingForDisplay() ?? decoded
         }
-        inflight[key] = task
+        inflight[canonical] = task
         let result = await task.value
-        inflight[key] = nil
+        if inflight[canonical] == task {
+            inflight[canonical] = nil
+        }
         if let result {
-            store(result, for: key)
+            store(result, for: canonical)
         }
         return result
     }
@@ -305,7 +361,7 @@ final class TavernAssetSchemeHandler: NSObject, WKURLSchemeHandler {
 
         let task = Task { [weak self] in
             do {
-                let (data, serverMime) = try await api.tavernAssetData(pathOrRelativeUrl: rawURL)
+                let (data, serverMime) = try await TavernAssetCache.shared.rawAsset(for: rawURL, api: api)
                 await MainActor.run {
                     guard let self, self.activeTasks.removeValue(forKey: key) != nil, !Task.isCancelled else {
                         return

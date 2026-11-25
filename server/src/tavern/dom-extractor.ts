@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { TavernMessage, TavernRenderBlock } from "./types.js";
+import type { TavernChatState, TavernMessage, TavernRenderBlock } from "./types.js";
 
 const ALLOWED_ASSET_PREFIXES = [
   "/characters/",
@@ -170,6 +170,52 @@ export function cleanIframeDocumentHtml(html: string): string {
 
 export function computeRenderedHash(blocks: TavernRenderBlock[]): string {
   return crypto.createHash("sha1").update(JSON.stringify(blocks)).digest("hex").slice(0, 12);
+}
+
+export function normalizeChatFileName(name?: string | null): string {
+  if (typeof name !== "string") return "";
+  return name.trim().replace(/\.jsonl$/i, "");
+}
+
+/**
+ * Computes an incremental diff of `state.messages` against client-known `(mesId -> renderedHash)`.
+ * Only strips unchanged, non-streaming messages when `state.chatFile` matches `knownChatFile`.
+ */
+export function applyIncrementalChatDiff(
+  state: TavernChatState,
+  knownChatFile?: string | null,
+  knownHashes?: Record<string, string> | null
+): TavernChatState {
+  const currentChat = normalizeChatFileName(state.chatFile);
+  const clientChat = normalizeChatFileName(knownChatFile);
+  if (
+    !currentChat ||
+    !clientChat ||
+    currentChat !== clientChat ||
+    !knownHashes ||
+    typeof knownHashes !== "object" ||
+    Object.keys(knownHashes).length === 0
+  ) {
+    return state;
+  }
+
+  const unchangedMesIds: number[] = [];
+  const changedMessages: TavernMessage[] = [];
+
+  for (const m of state.messages) {
+    const knownHash = knownHashes[String(m.mesId)];
+    if (!m.isStreaming && typeof knownHash === "string" && knownHash === m.renderedHash) {
+      unchangedMesIds.push(m.mesId);
+    } else {
+      changedMessages.push(m);
+    }
+  }
+
+  return {
+    ...state,
+    messages: changedMessages,
+    unchangedMesIds,
+  };
 }
 
 /** Strip hidden SillyTavern MVU / helper XML control tags from fallback markdown text. */

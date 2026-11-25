@@ -437,7 +437,7 @@ struct ServerSettings: Codable, Hashable, Sendable {
     }
 }
 
-struct BootstrapResponse: Decodable, Sendable {
+struct BootstrapResponse: Codable, Sendable {
     var agents: [AgentInfo]
     var sessions: [SessionSummary]
     var swarms: [SwarmSummary]

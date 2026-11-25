@@ -9,6 +9,9 @@ struct SettingsView: View {
     @State private var savingBark = false
     @State private var confirmSignOut = false
     @State private var showQuota = false
+    @State private var cacheStats: RelayCacheStats? = nil
+    @State private var clearingCache = false
+    @State private var confirmClearCache = false
 
     private var version: String {
         let info = Bundle.main.infoDictionary
@@ -120,6 +123,37 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    LabeledContent(
+                        "对话历史缓存",
+                        value: RelayFormat.bytes((cacheStats?.historyBytes ?? 0) + (cacheStats?.agentBytes ?? 0))
+                    )
+                    LabeledContent(
+                        "图片与脚本缓存",
+                        value: RelayFormat.bytes(cacheStats?.assetsBytes ?? 0)
+                    )
+                    LabeledContent(
+                        "总占用",
+                        value: RelayFormat.bytes(cacheStats?.totalBytes ?? 0)
+                    )
+                    Button(role: .destructive) {
+                        Haptics.tap()
+                        confirmClearCache = true
+                    } label: {
+                        Label(clearingCache ? "正在清理…" : "清空本地缓存", systemImage: "trash")
+                    }
+                    .disabled(clearingCache || (cacheStats?.totalBytes ?? 0) == 0)
+                } header: {
+                    HStack {
+                        Text("存储与缓存")
+                        if clearingCache {
+                            ProgressView().controlSize(.mini)
+                        }
+                    }
+                } footer: {
+                    Text("用于秒开历史对话、头像、前端卡片图片与脚本；自动按 LRU 控制占用上限。")
+                }
+
+                Section {
                     LabeledContent("版本", value: version)
                     LabeledContent("隐私", value: "零遥测 · 自托管")
                     LabeledContent("权限", value: "服务端自动批准")
@@ -154,8 +188,19 @@ struct SettingsView: View {
             } message: {
                 Text("服务端地址与令牌将从钥匙串中移除，会话数据仍保留在服务端。")
             }
+            .confirmationDialog("清空本地缓存？", isPresented: $confirmClearCache, titleVisibility: .visible) {
+                Button("清空本地缓存", role: .destructive) {
+                    clearCache()
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("仅清除本机缓存的对话历史、图片与脚本资源，不会影响服务端数据，也不会退出登录。")
+            }
             .onAppear {
                 barkDraft = store.barkUrl
+            }
+            .task {
+                cacheStats = await RelayDiskCache.shared.computeStats()
             }
             .sheet(isPresented: $showQuota) {
                 QuotaSheet()
@@ -171,6 +216,15 @@ struct SettingsView: View {
             await store.saveSettings(barkUrl: barkDraft, test: test)
             barkDraft = store.barkUrl
             savingBark = false
+        }
+    }
+
+    private func clearCache() {
+        clearingCache = true
+        Task {
+            await store.clearLocalCache()
+            cacheStats = await RelayDiskCache.shared.computeStats()
+            clearingCache = false
         }
     }
 }

@@ -87,6 +87,9 @@ final class AppStore {
     @ObservationIgnored private var pendingDeltas: [String: PendingDelta] = [:]
     @ObservationIgnored private var flushScheduled = false
     @ObservationIgnored private var bannerTask: Task<Void, Never>? = nil
+    @ObservationIgnored private var tavernConversationMemory: [String: CachedTavernConversation] = [:]
+    @ObservationIgnored private var latestChatByChar: [Int: String] = [:]
+    @ObservationIgnored private var latestChatHydrated = false
 
     private struct PendingDelta {
         var sessionId: String
@@ -101,6 +104,10 @@ final class AppStore {
         token = storedToken
         isPaired = !storedURL.isEmpty
         socket = RelaySocket()
+
+        if !storedURL.isEmpty {
+            Task { await RelayDiskCache.shared.setServerURL(storedURL) }
+        }
 
         socket.onEvent = { [weak self] data in
             self?.handleSocketData(data)
@@ -189,10 +196,46 @@ final class AppStore {
 
     func start() async {
         guard isPaired, let api else { return }
+        await RelayDiskCache.shared.setServerURL(serverURLString)
+        TavernHTMLHeightCache.shared.hydrateIfNeeded()
+        await hydrateFromDiskCache()
         if let request = api.webSocketRequest(), socket.state == .idle {
             socket.connect(request)
         }
         await refresh()
+    }
+
+    private func hydrateFromDiskCache() async {
+        if !hasBootstrapped, let cachedBoot = await RelayDiskCache.shared.loadBootstrap() {
+            agents = cachedBoot.agents
+            sessions = cachedBoot.sessions.sorted { $0.updatedAt > $1.updatedAt }
+            swarms = cachedBoot.swarms.sorted { $0.updatedAt > $1.updatedAt }
+            defaultCwd = cachedBoot.defaultCwd
+            barkUrl = cachedBoot.settings.barkUrl
+            hasBootstrapped = true
+        }
+        if !latestChatHydrated {
+            latestChatByChar = await RelayDiskCache.shared.loadLatestChatByChar()
+            latestChatHydrated = true
+        }
+        if tavernCharacters.isEmpty, let overview = await RelayDiskCache.shared.loadTavernOverview() {
+            var st = overview.status
+            st.isGenerating = false
+            if tavernStatus == nil { tavernStatus = st }
+            tavernCharacters = overview.characters
+        }
+    }
+
+    func clearLocalCache() async {
+        TavernAssetCache.shared.clear()
+        AttachmentImageCache.shared.clear()
+        TavernHTMLHeightCache.shared.clear()
+        tavernConversationMemory.removeAll()
+        latestChatByChar.removeAll()
+        latestChatHydrated = false
+        await RelayDiskCache.shared.clearCurrentServer()
+        Haptics.success()
+        showBanner("已清空本地缓存", isError: false)
     }
 
     func refresh() async {
@@ -243,6 +286,15 @@ final class AppStore {
         messages = messages.filter { known.contains($0.key) }
         let knownSwarms = Set(swarms.map(\.id))
         swarmBoardMessages = swarmBoardMessages.filter { knownSwarms.contains($0.key) }
+        let snapshot = CachedBootstrap(
+            agents: agents,
+            sessions: sessions,
+            swarms: swarms,
+            defaultCwd: defaultCwd,
+            settings: boot.settings,
+            updatedAt: Date().timeIntervalSince1970 * 1000
+        )
+        Task { await RelayDiskCache.shared.saveBootstrap(snapshot) }
     }
 
     // MARK: - Pairing
@@ -266,9 +318,12 @@ final class AppStore {
             KeychainStore.set(cleanToken, for: .bearerToken)
             serverURLString = url.absoluteString
             token = cleanToken
+            await RelayDiskCache.shared.setServerURL(url.absoluteString)
             messages = [:]
             swarmBoardMessages = [:]
             pendingOpenSessionId = nil
+            AttachmentImageCache.shared.clear()
+            TavernHTMLHeightCache.shared.clear()
             resetTavernState()
             apply(boot)
             withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
@@ -305,6 +360,8 @@ final class AppStore {
             quotas = nil
             quotaError = nil
             homeSection = .agent
+            AttachmentImageCache.shared.clear()
+            TavernHTMLHeightCache.shared.clear()
             resetTavernState()
         }
         serverURLString = ""
@@ -377,7 +434,13 @@ final class AppStore {
 
     func loadSession(_ id: String) async {
         guard api != nil else { return }
-        if messages[id] == nil { loadingSessions.insert(id) }
+        if messages[id] == nil {
+            if let cached = await RelayDiskCache.shared.loadAgentSession(id: id) {
+                messages[id] = cached.messages.sorted { $0.createdAt < $1.createdAt }
+            } else {
+                loadingSessions.insert(id)
+            }
+        }
         await reloadMessages(id)
         loadingSessions.remove(id)
     }
@@ -388,7 +451,14 @@ final class AppStore {
             let detail = try await api.session(id: id)
             flushDeltas()
             upsertSession(detail.session)
-            messages[id] = detail.messages.sorted { $0.createdAt < $1.createdAt }
+            let sorted = detail.messages.sorted { $0.createdAt < $1.createdAt }
+            messages[id] = sorted
+            let snapshot = CachedAgentSession(
+                session: detail.session,
+                messages: sorted,
+                updatedAt: Date().timeIntervalSince1970 * 1000
+            )
+            Task { await RelayDiskCache.shared.saveAgentSession(snapshot) }
         } catch {
             if let apiError = error as? RelayAPIError, case .server(let status, _) = apiError, status == 404 {
                 removeSessionLocally(id)
@@ -426,6 +496,7 @@ final class AppStore {
         do {
             try await api.deleteSession(id: id)
             messages[id] = nil
+            Task { await RelayDiskCache.shared.deleteAgentSession(id: id) }
         } catch {
             if let snapshot {
                 withAnimation { upsertSession(snapshot) }
@@ -483,12 +554,23 @@ final class AppStore {
 
     func loadSwarm(_ id: String) async {
         guard let api else { return }
+        if swarmBoardMessages[id] == nil, let cached = await RelayDiskCache.shared.loadSwarmDetail(id: id) {
+            if swarm(id: id) == nil { upsertSwarm(cached.swarm) }
+            swarmBoardMessages[id] = cached.messages.sorted { $0.seq < $1.seq }
+        }
         loadingSwarms.insert(id)
         defer { loadingSwarms.remove(id) }
         do {
             let detail = try await api.swarmDetail(id: id)
             upsertSwarm(detail.swarm)
-            swarmBoardMessages[id] = detail.messages.sorted { $0.seq < $1.seq }
+            let sorted = detail.messages.sorted { $0.seq < $1.seq }
+            swarmBoardMessages[id] = sorted
+            let snapshot = CachedSwarmDetail(
+                swarm: detail.swarm,
+                messages: sorted,
+                updatedAt: Date().timeIntervalSince1970 * 1000
+            )
+            Task { await RelayDiskCache.shared.saveSwarmDetail(snapshot) }
         } catch {
             if let apiError = error as? RelayAPIError, case .server(let status, _) = apiError, status == 404 {
                 removeSwarmLocally(id)
@@ -586,6 +668,7 @@ final class AppStore {
         Haptics.tap(.medium)
         do {
             try await api.deleteSwarm(id: id)
+            Task { await RelayDiskCache.shared.deleteSwarmDetail(id: id) }
         } catch {
             withAnimation {
                 if let swarmSnapshot { upsertSwarm(swarmSnapshot) }
@@ -612,22 +695,138 @@ final class AppStore {
         isMutatingTavern = false
         tavernError = nil
         activeTavernCharacterId = nil
+        tavernConversationMemory.removeAll()
+        latestChatByChar.removeAll()
+        latestChatHydrated = false
         TavernAssetCache.shared.clear()
     }
 
-    private func applyTavernState(_ state: TavernChatState, rawVariablesJSON: String? = nil) {
+    private func applyTavernState(_ state: TavernChatState, rawVariablesJSON: String? = nil, persist: Bool = true) {
+        let varsJSON = rawVariablesJSON ?? state.variablesJSON
         tavernState = state
         tavernStatus = state.status
-        tavernVariablesJSON = rawVariablesJSON ?? state.variablesJSON
+        tavernVariablesJSON = varsJSON
         if let char = state.character,
            let idx = tavernCharacters.firstIndex(where: { $0.id == char.id }) {
             tavernCharacters[idx] = char
         }
+        if persist {
+            persistTavernConversation(from: state, variablesJSON: varsJSON)
+        }
+    }
+
+    private func cachedTavernConversation(characterId: Int, chatFile: String?) async -> CachedTavernConversation? {
+        if !latestChatHydrated {
+            latestChatByChar = await RelayDiskCache.shared.loadLatestChatByChar()
+            latestChatHydrated = true
+        }
+        let targetChat = chatFile ?? latestChatByChar[characterId] ?? tavernCharacter(id: characterId)?.chat
+        guard let targetChat, !RelayDiskCache.normalizeChatFile(targetChat).isEmpty else { return nil }
+        let memKey = RelayDiskCache.conversationMemoryKey(characterId: characterId, chatFile: targetChat)
+        if let hit = tavernConversationMemory[memKey] {
+            return hit
+        }
+        if let disk = await RelayDiskCache.shared.loadTavernConversation(characterId: characterId, chatFile: targetChat) {
+            tavernConversationMemory[memKey] = disk
+            return disk
+        }
+        return nil
+    }
+
+    private func persistTavernConversation(from state: TavernChatState, variablesJSON: String) {
+        guard let charId = state.character?.id,
+              let chatFile = state.chatFile,
+              !RelayDiskCache.normalizeChatFile(chatFile).isEmpty else { return }
+
+        let sanitizedMessages: [TavernMessage] = state.messages.map { msg in
+            var copy = msg
+            copy.isStreaming = false
+            return copy
+        }
+        let cached = CachedTavernConversation(
+            characterId: charId,
+            chatFile: chatFile,
+            character: state.character,
+            userName: state.userName,
+            messages: sanitizedMessages,
+            variablesJSON: variablesJSON,
+            totalMessageCount: state.totalMessageCount,
+            hasMore: state.hasMore,
+            updatedAt: Date().timeIntervalSince1970 * 1000
+        )
+        let memKey = RelayDiskCache.conversationMemoryKey(characterId: charId, chatFile: chatFile)
+        tavernConversationMemory[memKey] = cached
+        latestChatByChar[charId] = chatFile
+        let latestMap = latestChatByChar
+        Task {
+            await RelayDiskCache.shared.saveTavernConversation(cached)
+            await RelayDiskCache.shared.saveLatestChatByChar(latestMap)
+        }
+    }
+
+    /// Merges an incremental/windowed server `TavernChatState` over a cached local conversation,
+    /// preserving `unchangedMesIds` and any already-scrolled older history before the server's window.
+    private func mergeTavernState(
+        incoming: TavernChatState,
+        existing: CachedTavernConversation?,
+        isReset: Bool
+    ) -> TavernChatState {
+        guard !isReset, let existing else {
+            var clean = incoming
+            clean.unchangedMesIds = nil
+            return clean
+        }
+        let sameChar = incoming.character?.id == existing.characterId
+        let incomingNorm = RelayDiskCache.normalizeChatFile(incoming.chatFile)
+        let existingNorm = RelayDiskCache.normalizeChatFile(existing.chatFile)
+        guard sameChar, !incomingNorm.isEmpty, incomingNorm == existingNorm else {
+            var clean = incoming
+            clean.unchangedMesIds = nil
+            return clean
+        }
+
+        let unchangedSet = Set(incoming.unchangedMesIds ?? [])
+        let serverIds = incoming.messages.map(\.mesId) + (incoming.unchangedMesIds ?? [])
+        let serverWindowMin = serverIds.min()
+        let totalCount = incoming.totalMessageCount
+
+        var byId: [Int: TavernMessage] = [:]
+        for msg in existing.messages {
+            if let totalCount, msg.mesId >= totalCount { continue }
+            let isUnchanged = unchangedSet.contains(msg.mesId)
+            let isOlderHistory = serverWindowMin != nil && msg.mesId < serverWindowMin!
+            if isUnchanged || isOlderHistory {
+                byId[msg.mesId] = msg
+            }
+        }
+        for msg in incoming.messages {
+            byId[msg.mesId] = msg
+        }
+
+        let mergedMessages = byId.values.sorted { $0.mesId < $1.mesId }
+        let computedHasMore: Bool
+        if let firstId = mergedMessages.first?.mesId {
+            computedHasMore = firstId > 0
+        } else {
+            computedHasMore = incoming.hasMore ?? false
+        }
+
+        var merged = incoming
+        merged.messages = mergedMessages
+        merged.hasMore = computedHasMore
+        merged.unchangedMesIds = nil
+        return merged
     }
 
     func loadTavernOverview() async {
         guard let api else { return }
-        isLoadingTavern = true
+        if tavernCharacters.isEmpty, let cached = await RelayDiskCache.shared.loadTavernOverview() {
+            var st = cached.status
+            st.isGenerating = false
+            if tavernStatus == nil { tavernStatus = st }
+            tavernCharacters = cached.characters
+        }
+        isLoadingTavern = tavernCharacters.isEmpty
         defer { isLoadingTavern = false }
         do {
             let statusRes = try await api.tavernStatus()
@@ -642,6 +841,12 @@ final class AppStore {
                 withAnimation(.easeOut(duration: 0.22)) {
                     tavernCharacters = charsRes.characters
                 }
+                let snapshot = CachedTavernOverview(
+                    status: charsRes.status,
+                    characters: charsRes.characters,
+                    updatedAt: Date().timeIntervalSince1970 * 1000
+                )
+                Task { await RelayDiskCache.shared.saveTavernOverview(snapshot) }
             }
         } catch {
             tavernError = error.localizedDescription
@@ -687,10 +892,17 @@ final class AppStore {
             tavernStatus = res.status
             tavernCharacters = res.characters
             TavernAssetCache.shared.clear()
+            tavernConversationMemory.removeAll()
+            let overview = CachedTavernOverview(
+                status: res.status,
+                characters: res.characters,
+                updatedAt: Date().timeIntervalSince1970 * 1000
+            )
+            Task { await RelayDiskCache.shared.saveTavernOverview(overview) }
             Haptics.success()
             showBanner("已同步原版酒馆配置", isError: false)
-            if activeTavernCharacterId != nil {
-                await loadTavernCurrent()
+            if let activeCharId = activeTavernCharacterId {
+                await selectTavernCharacter(id: activeCharId, forceFull: true)
             }
         } catch {
             Haptics.error()
@@ -700,22 +912,91 @@ final class AppStore {
 
     func loadTavernChats(characterId: Int) async {
         guard let api else { return }
+        if tavernChats[characterId] == nil,
+           let cached = await RelayDiskCache.shared.loadTavernChats(characterId: characterId) {
+            tavernChats[characterId] = cached
+        }
         do {
             let res = try await api.tavernCharacterChats(characterId: characterId)
             tavernChats[characterId] = res.chats
+            let snapshot = res.chats
+            Task { await RelayDiskCache.shared.saveTavernChats(snapshot, characterId: characterId) }
         } catch {
-            showBanner("读取历史聊天失败：\(error.localizedDescription)")
+            if tavernChats[characterId] == nil {
+                showBanner("读取历史聊天失败：\(error.localizedDescription)")
+            }
         }
     }
 
-    func selectTavernCharacter(id: Int, chatFile: String? = nil, createNew: Bool = false) async {
+    func selectTavernCharacter(
+        id: Int,
+        chatFile: String? = nil,
+        createNew: Bool = false,
+        forceFull: Bool = false
+    ) async {
         guard let api else { return }
-        isLoadingTavernChat = true
+
+        var cached: CachedTavernConversation? = nil
+        if !createNew && !forceFull {
+            cached = await cachedTavernConversation(characterId: id, chatFile: chatFile)
+        }
+
+        if let cached {
+            var baseStatus = tavernStatus ?? TavernStatus(enabled: true, ready: true)
+            baseStatus.currentCharacterId = id
+            baseStatus.currentCharacterName = cached.character?.name ?? tavernCharacter(id: id)?.name
+            baseStatus.currentChatFile = cached.chatFile
+            let hydrated = TavernChatState(
+                status: baseStatus,
+                character: cached.character ?? tavernCharacter(id: id),
+                chatFile: cached.chatFile,
+                userName: cached.userName,
+                messages: cached.messages,
+                variables: [:],
+                totalMessageCount: cached.totalMessageCount,
+                hasMore: cached.hasMore ?? ((cached.messages.first?.mesId ?? 0) > 0)
+            )
+            // Instant 0ms render from local cache with no spinner.
+            tavernState = hydrated
+            tavernVariablesJSON = cached.variablesJSON
+            isLoadingTavernChat = false
+        } else {
+            isLoadingTavernChat = true
+        }
         defer { isLoadingTavernChat = false }
+
+        var knownChatFile: String? = nil
+        var knownHashes: [String: String]? = nil
+        if !createNew && !forceFull, let cached, !cached.messages.isEmpty {
+            let recent = cached.messages
+                .filter { !$0.isStreaming && !$0.renderedHash.isEmpty }
+                .suffix(45)
+            if !recent.isEmpty {
+                var hashes: [String: String] = [:]
+                hashes.reserveCapacity(recent.count)
+                for m in recent {
+                    hashes[String(m.mesId)] = m.renderedHash
+                }
+                knownChatFile = cached.chatFile
+                knownHashes = hashes
+            }
+        }
+
         do {
-            let res = try await api.tavernSelect(characterId: id, chatFile: chatFile, createNew: createNew)
-            withAnimation(.easeOut(duration: 0.22)) {
-                applyTavernState(res.state)
+            let res = try await api.tavernSelect(
+                characterId: id,
+                chatFile: chatFile,
+                createNew: createNew,
+                knownChatFile: knownChatFile,
+                knownHashes: knownHashes
+            )
+            let merged = mergeTavernState(
+                incoming: res.state,
+                existing: cached,
+                isReset: createNew || forceFull
+            )
+            withAnimation(.easeOut(duration: 0.2)) {
+                applyTavernState(merged, persist: true)
             }
             if createNew {
                 Haptics.success()
@@ -723,7 +1004,9 @@ final class AppStore {
             }
         } catch {
             Haptics.error()
-            showBanner("切换角色聊天失败：\(error.localizedDescription)")
+            if cached == nil {
+                showBanner("切换角色聊天失败：\(error.localizedDescription)")
+            }
         }
     }
 
@@ -731,7 +1014,14 @@ final class AppStore {
         guard let api else { return }
         do {
             let res = try await api.tavernCurrent()
-            applyTavernState(res.state)
+            let existing: CachedTavernConversation?
+            if let charId = res.state.character?.id {
+                existing = await cachedTavernConversation(characterId: charId, chatFile: res.state.chatFile)
+            } else {
+                existing = nil
+            }
+            let merged = mergeTavernState(incoming: res.state, existing: existing, isReset: false)
+            applyTavernState(merged, persist: true)
         } catch {
             if tavernState == nil {
                 showBanner("读取当前酒馆会话失败：\(error.localizedDescription)")
@@ -766,15 +1056,28 @@ final class AppStore {
                 byId[m.mesId] = m
             }
             latest.messages = byId.values.sorted { $0.mesId < $1.mesId }
-            latest.hasMore = res.state.hasMore
+            latest.hasMore = (latest.messages.first?.mesId ?? 0) > 0
             if let total = res.state.totalMessageCount {
                 latest.totalMessageCount = total
             }
             tavernState = latest
+            persistTavernConversation(from: latest, variablesJSON: tavernVariablesJSON)
             Haptics.selection()
         } catch {
             showBanner("加载更早消息失败：\(error.localizedDescription)")
         }
+    }
+
+    private func mergeAndApplyTavernState(_ incoming: TavernChatState, rawVariablesJSON: String? = nil) {
+        let existingMem: CachedTavernConversation?
+        if let cid = incoming.character?.id {
+            let key = RelayDiskCache.conversationMemoryKey(characterId: cid, chatFile: incoming.chatFile)
+            existingMem = tavernConversationMemory[key]
+        } else {
+            existingMem = nil
+        }
+        let merged = mergeTavernState(incoming: incoming, existing: existingMem, isReset: false)
+        applyTavernState(merged, rawVariablesJSON: rawVariablesJSON, persist: true)
     }
 
     @discardableResult
@@ -788,7 +1091,7 @@ final class AppStore {
         do {
             let res = try await api.tavernSend(text: trimmed)
             withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
-                applyTavernState(res.state)
+                mergeAndApplyTavernState(res.state)
             }
             return true
         } catch {
@@ -850,7 +1153,7 @@ final class AppStore {
         do {
             let res = try await api.tavernSwipe(mesId: mesId, direction: direction)
             withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
-                applyTavernState(res.state)
+                mergeAndApplyTavernState(res.state)
             }
         } catch {
             Haptics.error()
@@ -865,7 +1168,7 @@ final class AppStore {
         defer { isMutatingTavern = false }
         do {
             let res = try await api.tavernEditMessage(mesId: mesId, text: text)
-            applyTavernState(res.state)
+            mergeAndApplyTavernState(res.state)
             Haptics.success()
             return true
         } catch {
@@ -879,10 +1182,30 @@ final class AppStore {
         guard let api else { return }
         isMutatingTavern = true
         defer { isMutatingTavern = false }
+        let priorState = tavernState
         do {
             let res = try await api.tavernDeleteMessage(mesId: mesId)
+            // Deleting mesId shifts all subsequent mesIds down; discard cached entries >= mesId
+            // while preserving any earlier scrolled history strictly below both mesId and server window.
+            var nextState = res.state
+            if let prior = priorState,
+               prior.character?.id == res.state.character?.id,
+               RelayDiskCache.normalizeChatFile(prior.chatFile) == RelayDiskCache.normalizeChatFile(res.state.chatFile),
+               let serverMin = res.state.messages.map(\.mesId).min() {
+                if mesId >= serverMin {
+                    let keptOlder = prior.messages.filter { $0.mesId < serverMin }
+                    if !keptOlder.isEmpty {
+                        nextState.messages = (keptOlder + res.state.messages).sorted { $0.mesId < $1.mesId }
+                        nextState.hasMore = (nextState.messages.first?.mesId ?? 0) > 0
+                    }
+                } else {
+                    // Deleted an older message before the server window; keep only the fresh window
+                    // so loading older messages retrieves contiguous, re-indexed history without gaps.
+                    nextState.hasMore = serverMin > 0
+                }
+            }
             withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) {
-                applyTavernState(res.state)
+                applyTavernState(nextState, persist: true)
             }
             Haptics.tap(.medium)
         } catch {
@@ -898,7 +1221,7 @@ final class AppStore {
         guard !trimmed.isEmpty else { return nil }
         do {
             let res = try await api.tavernSlash(command: trimmed)
-            applyTavernState(res.state)
+            mergeAndApplyTavernState(res.state)
             if let result = res.result, !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 showBanner(result, isError: false)
             }
@@ -1224,7 +1547,13 @@ final class AppStore {
             if let s = p.session { upsertSession(s) }
             setRunning(sid, false)
             if activeSessionId == sid { Haptics.success() }
-            if messages[sid] != nil {
+            if let list = messages[sid], let sess = session(sid) {
+                let snapshot = CachedAgentSession(
+                    session: sess,
+                    messages: list,
+                    updatedAt: Date().timeIntervalSince1970 * 1000
+                )
+                Task { await RelayDiskCache.shared.saveAgentSession(snapshot) }
                 Task { await self.reloadMessages(sid) }
             }
             if quotas != nil {
@@ -1272,6 +1601,14 @@ final class AppStore {
                     if !targetId.isEmpty {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
                             insertBoardMessage(msg, swarmId: targetId)
+                        }
+                        if let sw = p.swarm ?? swarm(id: targetId), let list = swarmBoardMessages[targetId] {
+                            let snapshot = CachedSwarmDetail(
+                                swarm: sw,
+                                messages: list,
+                                updatedAt: Date().timeIntervalSince1970 * 1000
+                            )
+                            Task { await RelayDiskCache.shared.saveSwarmDetail(snapshot) }
                         }
                     }
                 }
@@ -1365,7 +1702,15 @@ final class AppStore {
         case "tavern_chat_updated":
             if let st = decodePayload(WSTavernChatUpdatedPayload.self, from: data)?.state {
                 let rawJSON = Self.extractRawVariablesJSON(from: data, nestedInState: true)
-                applyTavernState(st, rawVariablesJSON: rawJSON)
+                let existingMem: CachedTavernConversation?
+                if let cid = st.character?.id {
+                    let key = RelayDiskCache.conversationMemoryKey(characterId: cid, chatFile: st.chatFile)
+                    existingMem = tavernConversationMemory[key]
+                } else {
+                    existingMem = nil
+                }
+                let merged = mergeTavernState(incoming: st, existing: existingMem, isReset: false)
+                applyTavernState(merged, rawVariablesJSON: rawJSON, persist: true)
             }
 
         default:

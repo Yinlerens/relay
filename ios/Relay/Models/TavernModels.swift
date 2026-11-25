@@ -359,9 +359,33 @@ struct TavernChatState: Codable, Hashable, Sendable {
     var variables: [String: JSONAnyValue]
     var totalMessageCount: Int?
     var hasMore: Bool?
+    var unchangedMesIds: [Int]?
 
     enum CodingKeys: String, CodingKey {
-        case status, character, chatFile, userName, messages, variables, totalMessageCount, hasMore
+        case status, character, chatFile, userName, messages, variables
+        case totalMessageCount, hasMore, unchangedMesIds
+    }
+
+    init(
+        status: TavernStatus,
+        character: TavernCharacter?,
+        chatFile: String?,
+        userName: String,
+        messages: [TavernMessage],
+        variables: [String: JSONAnyValue] = [:],
+        totalMessageCount: Int? = nil,
+        hasMore: Bool? = nil,
+        unchangedMesIds: [Int]? = nil
+    ) {
+        self.status = status
+        self.character = character
+        self.chatFile = chatFile
+        self.userName = userName
+        self.messages = messages
+        self.variables = variables
+        self.totalMessageCount = totalMessageCount
+        self.hasMore = hasMore
+        self.unchangedMesIds = unchangedMesIds
     }
 
     init(from decoder: Decoder) throws {
@@ -374,6 +398,7 @@ struct TavernChatState: Codable, Hashable, Sendable {
         variables = (try? c.decodeIfPresent([String: JSONAnyValue].self, forKey: .variables)) ?? [:]
         totalMessageCount = c.flexOptionalInt(.totalMessageCount)
         hasMore = try? c.decodeIfPresent(Bool.self, forKey: .hasMore)
+        unchangedMesIds = try? c.decodeIfPresent([Int].self, forKey: .unchangedMesIds)
     }
 
     var variablesJSON: String {
