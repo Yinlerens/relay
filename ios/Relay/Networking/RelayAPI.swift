@@ -312,6 +312,203 @@ struct RelayAPI: Sendable {
         _ = try await json("/api/swarms/\(id)", method: "DELETE", as: OkResponse.self)
     }
 
+    // MARK: Tavern (SillyTavern Bridge) endpoints
+
+    func tavernStatus() async throws -> TavernStatusResponse {
+        var request = authorizedRequest("/api/tavern/status")
+        request.timeoutInterval = 30
+        return try await send(request, as: TavernStatusResponse.self)
+    }
+
+    func tavernLogin(handle: String, password: String) async throws -> TavernStatusResponse {
+        var request = authorizedRequest("/api/tavern/login", method: "POST")
+        request.timeoutInterval = 60
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["handle": handle, "password": password])
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await send(request, as: TavernStatusResponse.self)
+    }
+
+    func tavernReload() async throws -> TavernReloadResponse {
+        var request = authorizedRequest("/api/tavern/reload", method: "POST")
+        request.timeoutInterval = 90
+        request.httpBody = Data("{}".utf8)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await send(request, as: TavernReloadResponse.self)
+    }
+
+    func tavernCharacters() async throws -> TavernCharactersResponse {
+        var request = authorizedRequest("/api/tavern/characters")
+        request.timeoutInterval = 60
+        return try await send(request, as: TavernCharactersResponse.self)
+    }
+
+    func tavernCharacterChats(characterId: Int) async throws -> TavernChatsResponse {
+        var request = authorizedRequest("/api/tavern/characters/\(characterId)/chats")
+        request.timeoutInterval = 60
+        return try await send(request, as: TavernChatsResponse.self)
+    }
+
+    func tavernSelect(characterId: Int, chatFile: String? = nil, createNew: Bool = false) async throws -> TavernStateResponse {
+        var body: [String: Any] = ["characterId": characterId]
+        if let chatFile, !chatFile.isEmpty { body["chatFile"] = chatFile }
+        if createNew { body["createNew"] = true }
+        var request = authorizedRequest("/api/tavern/select", method: "POST")
+        request.timeoutInterval = 90
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await send(request, as: TavernStateResponse.self)
+    }
+
+    func tavernCurrent() async throws -> TavernStateResponse {
+        try await json("/api/tavern/current", as: TavernStateResponse.self)
+    }
+
+    func tavernSend(text: String) async throws -> TavernActionStateResponse {
+        var request = authorizedRequest("/api/tavern/send", method: "POST")
+        request.timeoutInterval = 60
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["text": text])
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await send(request, as: TavernActionStateResponse.self)
+    }
+
+    func tavernStop() async throws -> TavernStopResponse {
+        var request = authorizedRequest("/api/tavern/stop", method: "POST")
+        request.httpBody = Data("{}".utf8)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await send(request, as: TavernStopResponse.self)
+    }
+
+    func tavernRegenerate() async throws -> OkResponse {
+        var request = authorizedRequest("/api/tavern/regenerate", method: "POST")
+        request.timeoutInterval = 60
+        request.httpBody = Data("{}".utf8)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await send(request, as: OkResponse.self)
+    }
+
+    func tavernContinue() async throws -> OkResponse {
+        var request = authorizedRequest("/api/tavern/continue", method: "POST")
+        request.timeoutInterval = 60
+        request.httpBody = Data("{}".utf8)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await send(request, as: OkResponse.self)
+    }
+
+    func tavernSwipe(mesId: Int, direction: TavernSwipeDirection) async throws -> TavernMessageMutationResponse {
+        var request = authorizedRequest("/api/tavern/swipe", method: "POST")
+        request.timeoutInterval = 60
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "mesId": mesId,
+            "direction": direction.rawValue,
+        ])
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await send(request, as: TavernMessageMutationResponse.self)
+    }
+
+    func tavernEditMessage(mesId: Int, text: String) async throws -> TavernMessageMutationResponse {
+        try await json(
+            "/api/tavern/messages/\(mesId)",
+            method: "PATCH",
+            body: ["text": text],
+            as: TavernMessageMutationResponse.self
+        )
+    }
+
+    func tavernDeleteMessage(mesId: Int) async throws -> TavernActionStateResponse {
+        try await json(
+            "/api/tavern/messages/\(mesId)",
+            method: "DELETE",
+            as: TavernActionStateResponse.self
+        )
+    }
+
+    func tavernSlash(command: String) async throws -> TavernSlashResponse {
+        var request = authorizedRequest("/api/tavern/slash", method: "POST")
+        request.timeoutInterval = 60
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["command": command])
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await send(request, as: TavernSlashResponse.self)
+    }
+
+    /// Fetches a SillyTavern asset via `/api/tavern/asset?path=...` (Bearer auth) or external HTTP(S) URL (no Bearer).
+    /// Accepts:
+    /// - `relay-st://asset?path=...`
+    /// - `/api/tavern/asset?path=...`
+    /// - Raw relative ST path (`/thumbnail?type=avatar&file=...`, `/characters/...`)
+    /// - External `https://...` / `http://...` or `data:` URI
+    func tavernAssetData(pathOrRelativeUrl raw: String) async throws -> (data: Data, mimeType: String?) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw RelayAPIError.invalidURL }
+
+        if trimmed.hasPrefix("data:"), let dataURL = URL(string: trimmed) {
+            let data = try Data(contentsOf: dataURL)
+            let header = trimmed.dropFirst(5).split(separator: ",").first.map(String.init)
+            let mime = header?.split(separator: ";").first.map(String.init)
+            return (data, mime)
+        }
+
+        if trimmed.lowercased().hasPrefix("http://") || trimmed.lowercased().hasPrefix("https://") {
+            guard let externalURL = URL(string: trimmed) else { throw RelayAPIError.invalidURL }
+            var req = URLRequest(url: externalURL)
+            req.timeoutInterval = 30
+            // Never attach Relay Bearer token to external hosts.
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                throw RelayAPIError.server(status: (response as? HTTPURLResponse)?.statusCode ?? 0, message: "图片加载失败")
+            }
+            return (data, http.value(forHTTPHeaderField: "Content-Type"))
+        }
+
+        let extractedPath: String
+        if trimmed.lowercased().hasPrefix("relay-st://") {
+            guard let comps = URLComponents(string: trimmed) else {
+                throw RelayAPIError.invalidURL
+            }
+            if let pathVal = comps.queryItems?.first(where: { $0.name == "path" })?.value, !pathVal.isEmpty {
+                extractedPath = pathVal
+            } else if !comps.path.isEmpty && comps.path != "/" {
+                if let q = comps.percentEncodedQuery, !q.isEmpty {
+                    extractedPath = "\(comps.path)?\(q)"
+                } else {
+                    extractedPath = comps.path
+                }
+            } else {
+                throw RelayAPIError.invalidURL
+            }
+        } else if trimmed.hasPrefix("/api/tavern/asset") {
+            guard let comps = URLComponents(string: trimmed),
+                  let pathVal = comps.queryItems?.first(where: { $0.name == "path" })?.value,
+                  !pathVal.isEmpty else {
+                throw RelayAPIError.invalidURL
+            }
+            extractedPath = pathVal
+        } else {
+            extractedPath = trimmed.hasPrefix("/") ? trimmed : "/" + trimmed
+        }
+
+        guard var comps = URLComponents(url: url("/api/tavern/asset"), resolvingAgainstBaseURL: false) else {
+            throw RelayAPIError.invalidURL
+        }
+        comps.queryItems = [URLQueryItem(name: "path", value: extractedPath)]
+        guard let targetURL = comps.url else { throw RelayAPIError.invalidURL }
+
+        var request = URLRequest(url: targetURL)
+        request.timeoutInterval = 30
+        if !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw RelayAPIError.transport("无效的响应")
+        }
+        if http.statusCode == 401 { throw RelayAPIError.unauthorized }
+        guard (200..<300).contains(http.statusCode) else {
+            throw RelayAPIError.server(status: http.statusCode, message: "酒馆资源加载失败")
+        }
+        return (data, http.value(forHTTPHeaderField: "Content-Type"))
+    }
+
     /// `ws(s)://host/ws` request with Bearer auth header for `URLSessionWebSocketTask`.
     func webSocketRequest() -> URLRequest? {
         guard var components = URLComponents(url: url("/ws"), resolvingAgainstBaseURL: false) else { return nil }

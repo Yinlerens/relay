@@ -1,0 +1,107 @@
+export interface TavernStatus {
+  enabled: boolean;
+  ready: boolean;
+  needsLogin: boolean;
+  handle: string | null;
+  publicUrl: string;
+  currentCharacterId: number | null;
+  currentCharacterName: string | null;
+  currentChatFile: string | null;
+  isGenerating: boolean;
+  lastError: string | null;
+}
+
+export interface TavernLoginUser {
+  handle: string;
+  name: string;
+}
+
+export interface TavernCharacter {
+  id: number;
+  name: string;
+  avatar: string;
+  avatarUrl: string;
+  chat: string | null;
+  lastChatAt: number;
+  tags: string[];
+  tagline: string;
+}
+
+export interface TavernChatFile {
+  fileName: string;
+  displayName: string;
+  lastMessage: string;
+  messageCount: number;
+  updatedAt: number;
+  isCurrent: boolean;
+}
+
+export type TavernRenderBlockKind = "markdown" | "html" | "iframe" | "image" | "details";
+
+export interface TavernRenderBlock {
+  id: string;
+  kind: TavernRenderBlockKind;
+  markdown?: string;
+  summary?: string;
+  html?: string;
+  imageUrl?: string;
+  imageAlt?: string;
+  estimatedHeight?: number;
+}
+
+export interface TavernMessage {
+  mesId: number;
+  name: string;
+  avatarUrl: string | null;
+  isUser: boolean;
+  isSystem: boolean;
+  sendDate: string;
+  rawText: string;
+  reasoning: string;
+  swipeId: number;
+  swipeCount: number;
+  blocks: TavernRenderBlock[];
+  renderedHash: string;
+  isStreaming: boolean;
+}
+
+export interface TavernChatState {
+  status: TavernStatus;
+  character: TavernCharacter | null;
+  chatFile: string | null;
+  userName: string;
+  messages: TavernMessage[];
+  variables: Record<string, unknown>;
+}
+
+export type TavernSwipeDirection = "left" | "right" | "new";
+
+export interface TavernBridgeLike {
+  getStatus(): Promise<{ status: TavernStatus; loginUsers?: TavernLoginUser[] }>;
+  login(handle: string, password: string): Promise<{ status: TavernStatus }>;
+  reload(): Promise<{ status: TavernStatus; characters: TavernCharacter[] }>;
+  listCharacters(): Promise<{ status: TavernStatus; characters: TavernCharacter[] }>;
+  listCharacterChats(characterId: number): Promise<{ characterId: number; chats: TavernChatFile[] }>;
+  selectCharacter(input: {
+    characterId: number;
+    chatFile?: string;
+    createNew?: boolean;
+  }): Promise<{ state: TavernChatState }>;
+  getCurrentState(): Promise<{ state: TavernChatState }>;
+  sendMessage(text: string): Promise<{ ok: true; state: TavernChatState }>;
+  stopGeneration(): Promise<{ stopped: boolean }>;
+  regenerate(): Promise<{ ok: true }>;
+  continueGeneration(): Promise<{ ok: true }>;
+  swipe(
+    mesId: number,
+    direction: TavernSwipeDirection
+  ): Promise<{ message: TavernMessage | null; state: TavernChatState }>;
+  editMessage(
+    mesId: number,
+    text: string
+  ): Promise<{ message: TavernMessage | null; state: TavernChatState }>;
+  deleteMessage(mesId: number): Promise<{ ok: true; state: TavernChatState }>;
+  runSlash(command: string): Promise<{ ok: true; result?: string; state: TavernChatState }>;
+  getAssetCookieHeader(): Promise<string>;
+  dispose(): Promise<void>;
+}

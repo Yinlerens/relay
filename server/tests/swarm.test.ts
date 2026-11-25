@@ -449,6 +449,11 @@ describe("Relay Swarm Backend", () => {
       agentsConfigPath: path.join(tmpDir, "agents.json"),
       defaultCwd: gitRepoDir,
       homeDir: tmpDir,
+      stUrl: "http://127.0.0.1:8000",
+      stPublicUrl: "https://st.apps.makima.sbs",
+      tavernProfileDir: path.join(dataDir, "tavern-profile"),
+      tavernAuthPath: path.join(dataDir, "tavern-auth.enc.json"),
+      tavernEnabled: false,
     };
 
     const agents: AgentProfile[] = [

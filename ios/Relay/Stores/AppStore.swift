@@ -14,6 +14,19 @@ struct PairingRequest: Identifiable, Equatable {
     var token: String
 }
 
+enum HomeSection: String, CaseIterable, Identifiable {
+    case agent
+    case tavern
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .agent: return "Agent"
+        case .tavern: return "酒馆"
+        }
+    }
+}
+
 /// Single source of truth for the app: pairing, sessions, messages, live streaming and config switching.
 @MainActor
 @Observable
@@ -37,6 +50,7 @@ final class AppStore {
     var swarmBoardMessages: [String: [SwarmBoardMessage]] = [:]
 
     // MARK: UI state
+    var homeSection: HomeSection = .agent
     var socketState: RelaySocket.State = .idle
     var loadingSessions: Set<String> = []
     var loadingSwarms: Set<String> = []
@@ -51,6 +65,21 @@ final class AppStore {
     var quotas: QuotaOverview? = nil
     var isLoadingQuotas = false
     var quotaError: String? = nil
+
+    // MARK: Tavern (SillyTavern Bridge)
+    var tavernStatus: TavernStatus? = nil
+    var tavernLoginUsers: [TavernLoginUser] = []
+    var tavernCharacters: [TavernCharacter] = []
+    var tavernChats: [Int: [TavernChatFile]] = [:]
+    var tavernState: TavernChatState? = nil
+    var tavernVariablesJSON: String = "{}"
+    var isLoadingTavern = false
+    var isLoadingTavernChat = false
+    var isLoggingInTavern = false
+    var isReloadingTavern = false
+    var isMutatingTavern = false
+    var tavernError: String? = nil
+    var activeTavernCharacterId: Int? = nil
 
     // MARK: Private
     private let socket: RelaySocket
@@ -135,6 +164,22 @@ final class AppStore {
         pendingOpenSessionId = sessionId
     }
 
+    var tavernMessages: [TavernMessage] {
+        tavernState?.messages ?? []
+    }
+
+    var isTavernGenerating: Bool {
+        (tavernState?.status.isGenerating ?? false) || (tavernStatus?.isGenerating ?? false)
+    }
+
+    func tavernChats(for characterId: Int) -> [TavernChatFile] {
+        tavernChats[characterId] ?? []
+    }
+
+    func tavernCharacter(id: Int) -> TavernCharacter? {
+        tavernCharacters.first(where: { $0.id == id })
+    }
+
     func configKey(_ sessionId: String, _ kind: ConfigKind, _ configId: String?) -> String {
         "\(sessionId)|\(kind.rawValue)|\(configId ?? "")"
     }
@@ -170,6 +215,11 @@ final class AppStore {
             if let sw = swarm(forSessionId: active) {
                 await loadSwarm(sw.id)
             }
+        }
+        if activeTavernCharacterId != nil {
+            await loadTavernCurrent()
+        } else if homeSection == .tavern {
+            await loadTavernOverview()
         }
     }
 
@@ -218,6 +268,7 @@ final class AppStore {
             messages = [:]
             swarmBoardMessages = [:]
             pendingOpenSessionId = nil
+            resetTavernState()
             apply(boot)
             withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
                 isPaired = true
@@ -252,6 +303,8 @@ final class AppStore {
             loadingSwarms = []
             quotas = nil
             quotaError = nil
+            homeSection = .agent
+            resetTavernState()
         }
         serverURLString = ""
         token = ""
@@ -539,6 +592,298 @@ final class AppStore {
             }
             showBanner("删除蜂群失败：\(error.localizedDescription)")
         }
+    }
+
+    // MARK: - Tavern (SillyTavern Bridge)
+
+    private func resetTavernState() {
+        tavernStatus = nil
+        tavernLoginUsers = []
+        tavernCharacters = []
+        tavernChats = [:]
+        tavernState = nil
+        tavernVariablesJSON = "{}"
+        isLoadingTavern = false
+        isLoadingTavernChat = false
+        isLoggingInTavern = false
+        isReloadingTavern = false
+        isMutatingTavern = false
+        tavernError = nil
+        activeTavernCharacterId = nil
+        TavernAssetCache.shared.clear()
+    }
+
+    private func applyTavernState(_ state: TavernChatState, rawVariablesJSON: String? = nil) {
+        tavernState = state
+        tavernStatus = state.status
+        tavernVariablesJSON = rawVariablesJSON ?? state.variablesJSON
+        if let char = state.character,
+           let idx = tavernCharacters.firstIndex(where: { $0.id == char.id }) {
+            tavernCharacters[idx] = char
+        }
+    }
+
+    func loadTavernOverview() async {
+        guard let api else { return }
+        isLoadingTavern = true
+        defer { isLoadingTavern = false }
+        do {
+            let statusRes = try await api.tavernStatus()
+            tavernStatus = statusRes.status
+            if let users = statusRes.loginUsers {
+                tavernLoginUsers = users
+            }
+            tavernError = nil
+            if statusRes.status.enabled && statusRes.status.ready && !statusRes.status.needsLogin {
+                let charsRes = try await api.tavernCharacters()
+                tavernStatus = charsRes.status
+                withAnimation(.easeOut(duration: 0.22)) {
+                    tavernCharacters = charsRes.characters
+                }
+            }
+        } catch {
+            tavernError = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    func loginTavern(handle: String, password: String) async -> Bool {
+        guard let api, !isLoggingInTavern else { return false }
+        let cleanHandle = handle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanHandle.isEmpty else {
+            showBanner("请输入酒馆用户名")
+            return false
+        }
+        isLoggingInTavern = true
+        defer { isLoggingInTavern = false }
+        do {
+            let res = try await api.tavernLogin(handle: cleanHandle, password: password)
+            tavernStatus = res.status
+            if let users = res.loginUsers { tavernLoginUsers = users }
+            if res.status.needsLogin {
+                Haptics.error()
+                showBanner(res.status.lastError ?? "酒馆登录失败，请检查账号密码")
+                return false
+            }
+            Haptics.success()
+            showBanner("已登录酒馆", isError: false)
+            await loadTavernOverview()
+            return true
+        } catch {
+            Haptics.error()
+            showBanner("酒馆登录失败：\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    func reloadTavern() async {
+        guard let api, !isReloadingTavern else { return }
+        isReloadingTavern = true
+        defer { isReloadingTavern = false }
+        do {
+            let res = try await api.tavernReload()
+            tavernStatus = res.status
+            tavernCharacters = res.characters
+            TavernAssetCache.shared.clear()
+            Haptics.success()
+            showBanner("已同步原版酒馆配置", isError: false)
+            if activeTavernCharacterId != nil {
+                await loadTavernCurrent()
+            }
+        } catch {
+            Haptics.error()
+            showBanner("同步失败：\(error.localizedDescription)")
+        }
+    }
+
+    func loadTavernChats(characterId: Int) async {
+        guard let api else { return }
+        do {
+            let res = try await api.tavernCharacterChats(characterId: characterId)
+            tavernChats[characterId] = res.chats
+        } catch {
+            showBanner("读取历史聊天失败：\(error.localizedDescription)")
+        }
+    }
+
+    func selectTavernCharacter(id: Int, chatFile: String? = nil, createNew: Bool = false) async {
+        guard let api else { return }
+        isLoadingTavernChat = true
+        defer { isLoadingTavernChat = false }
+        do {
+            let res = try await api.tavernSelect(characterId: id, chatFile: chatFile, createNew: createNew)
+            withAnimation(.easeOut(duration: 0.22)) {
+                applyTavernState(res.state)
+            }
+            if createNew {
+                Haptics.success()
+                Task { await self.loadTavernChats(characterId: id) }
+            }
+        } catch {
+            Haptics.error()
+            showBanner("切换角色聊天失败：\(error.localizedDescription)")
+        }
+    }
+
+    func loadTavernCurrent() async {
+        guard let api else { return }
+        do {
+            let res = try await api.tavernCurrent()
+            applyTavernState(res.state)
+        } catch {
+            if tavernState == nil {
+                showBanner("读取当前酒馆会话失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    @discardableResult
+    func sendTavernMessage(text: String) async -> Bool {
+        guard let api else { return false }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        tavernStatus?.isGenerating = true
+        tavernState?.status.isGenerating = true
+        Haptics.tap(.soft)
+        do {
+            let res = try await api.tavernSend(text: trimmed)
+            withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
+                applyTavernState(res.state)
+            }
+            return true
+        } catch {
+            tavernStatus?.isGenerating = false
+            tavernState?.status.isGenerating = false
+            Haptics.error()
+            showBanner("发送失败：\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    func stopTavernGeneration() async {
+        guard let api else { return }
+        Haptics.tap(.rigid)
+        do {
+            _ = try await api.tavernStop()
+            tavernStatus?.isGenerating = false
+            tavernState?.status.isGenerating = false
+        } catch {
+            showBanner("停止生成失败：\(error.localizedDescription)")
+        }
+    }
+
+    func regenerateTavern() async {
+        guard let api else { return }
+        tavernStatus?.isGenerating = true
+        tavernState?.status.isGenerating = true
+        Haptics.tap(.soft)
+        do {
+            _ = try await api.tavernRegenerate()
+        } catch {
+            tavernStatus?.isGenerating = false
+            tavernState?.status.isGenerating = false
+            Haptics.error()
+            showBanner("重新生成失败：\(error.localizedDescription)")
+        }
+    }
+
+    func continueTavern() async {
+        guard let api else { return }
+        tavernStatus?.isGenerating = true
+        tavernState?.status.isGenerating = true
+        Haptics.tap(.soft)
+        do {
+            _ = try await api.tavernContinue()
+        } catch {
+            tavernStatus?.isGenerating = false
+            tavernState?.status.isGenerating = false
+            Haptics.error()
+            showBanner("继续生成失败：\(error.localizedDescription)")
+        }
+    }
+
+    func swipeTavern(mesId: Int, direction: TavernSwipeDirection) async {
+        guard let api, !isMutatingTavern else { return }
+        isMutatingTavern = true
+        defer { isMutatingTavern = false }
+        Haptics.selection()
+        do {
+            let res = try await api.tavernSwipe(mesId: mesId, direction: direction)
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                applyTavernState(res.state)
+            }
+        } catch {
+            Haptics.error()
+            showBanner("切换回复失败：\(error.localizedDescription)")
+        }
+    }
+
+    @discardableResult
+    func editTavernMessage(mesId: Int, text: String) async -> Bool {
+        guard let api else { return false }
+        isMutatingTavern = true
+        defer { isMutatingTavern = false }
+        do {
+            let res = try await api.tavernEditMessage(mesId: mesId, text: text)
+            applyTavernState(res.state)
+            Haptics.success()
+            return true
+        } catch {
+            Haptics.error()
+            showBanner("编辑消息失败：\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    func deleteTavernMessage(mesId: Int) async {
+        guard let api else { return }
+        isMutatingTavern = true
+        defer { isMutatingTavern = false }
+        do {
+            let res = try await api.tavernDeleteMessage(mesId: mesId)
+            withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) {
+                applyTavernState(res.state)
+            }
+            Haptics.tap(.medium)
+        } catch {
+            Haptics.error()
+            showBanner("删除楼层失败：\(error.localizedDescription)")
+        }
+    }
+
+    @discardableResult
+    func runTavernSlash(_ command: String) async -> String? {
+        guard let api else { return nil }
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        do {
+            let res = try await api.tavernSlash(command: trimmed)
+            applyTavernState(res.state)
+            if let result = res.result, !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                showBanner(result, isError: false)
+            }
+            return res.result
+        } catch {
+            Haptics.error()
+            showBanner("指令执行失败：\(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// Extracts raw `payload.variables` or `payload.state.variables` JSON string directly for lossless WebView injection.
+    private static func extractRawVariablesJSON(from data: Data, nestedInState: Bool) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payload = root["payload"] as? [String: Any] else {
+            return nil
+        }
+        let container: [String: Any]? = nestedInState ? (payload["state"] as? [String: Any]) : payload
+        guard let vars = container?["variables"],
+              JSONSerialization.isValidJSONObject(vars),
+              let encoded = try? JSONSerialization.data(withJSONObject: vars, options: []),
+              let str = String(data: encoded, encoding: .utf8) else {
+            return nil
+        }
+        return str
     }
 
     // MARK: - Quotas
@@ -890,6 +1235,81 @@ final class AppStore {
                         }
                     }
                 }
+            }
+
+        case "tavern_status":
+            if let st = decodePayload(WSTavernStatusPayload.self, from: data)?.status {
+                tavernStatus = st
+                if tavernState != nil {
+                    tavernState?.status = st
+                }
+            }
+
+        case "tavern_stream_delta":
+            guard let p = decodePayload(WSTavernStreamDeltaPayload.self, from: data) else { return }
+            tavernStatus?.isGenerating = true
+            guard var state = tavernState else { return }
+            if let cid = p.characterId, let currentId = state.character?.id, cid != currentId { return }
+            if let cf = p.chatFile, let currentCf = state.chatFile, !cf.isEmpty, !currentCf.isEmpty, cf != currentCf { return }
+            state.status.isGenerating = true
+            if let idx = state.messages.lastIndex(where: { $0.mesId == p.mesId }) {
+                state.messages[idx].rawText = p.text
+                if !p.reasoning.isEmpty {
+                    state.messages[idx].reasoning = p.reasoning
+                }
+                state.messages[idx].isStreaming = true
+            } else {
+                let placeholder = TavernMessage(
+                    mesId: p.mesId,
+                    name: state.character?.name ?? "角色",
+                    avatarUrl: state.character?.avatarUrl,
+                    isUser: false,
+                    isSystem: false,
+                    sendDate: "",
+                    rawText: p.text,
+                    reasoning: p.reasoning,
+                    swipeId: 0,
+                    swipeCount: 1,
+                    blocks: [],
+                    renderedHash: "stream-\(p.mesId)",
+                    isStreaming: true
+                )
+                state.messages.append(placeholder)
+                state.messages.sort { $0.mesId < $1.mesId }
+            }
+            tavernState = state
+
+        case "tavern_message_finalized":
+            guard let p = decodePayload(WSTavernMessageFinalizedPayload.self, from: data) else { return }
+            let stillGenerating = p.isGenerating ?? false
+            tavernStatus?.isGenerating = stillGenerating
+            if var state = tavernState {
+                let matchesChar = p.characterId == nil || state.character?.id == p.characterId
+                if matchesChar {
+                    state.status.isGenerating = stillGenerating
+                    if let msg = p.message {
+                        if let idx = state.messages.lastIndex(where: { $0.mesId == msg.mesId }) {
+                            state.messages[idx] = msg
+                        } else {
+                            state.messages.append(msg)
+                            state.messages.sort { $0.mesId < $1.mesId }
+                        }
+                    }
+                    if let vars = p.variables {
+                        state.variables = vars
+                    }
+                    let rawJSON = Self.extractRawVariablesJSON(from: data, nestedInState: false)
+                    applyTavernState(state, rawVariablesJSON: rawJSON ?? (p.variables != nil ? state.variablesJSON : tavernVariablesJSON))
+                    if activeTavernCharacterId != nil && !stillGenerating {
+                        Haptics.success()
+                    }
+                }
+            }
+
+        case "tavern_chat_updated":
+            if let st = decodePayload(WSTavernChatUpdatedPayload.self, from: data)?.state {
+                let rawJSON = Self.extractRawVariablesJSON(from: data, nestedInState: true)
+                applyTavernState(st, rawVariablesJSON: rawJSON)
             }
 
         default:

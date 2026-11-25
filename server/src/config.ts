@@ -23,6 +23,11 @@ export interface AppConfig {
   agentsConfigPath: string;
   defaultCwd: string;
   homeDir: string;
+  stUrl: string;
+  stPublicUrl: string;
+  tavernProfileDir: string;
+  tavernAuthPath: string;
+  tavernEnabled: boolean;
 }
 
 export function loadConfig(): AppConfig {
@@ -57,6 +62,13 @@ export function loadConfig(): AppConfig {
     throw new Error("RELAY_TOKEN must be configured in production");
   }
 
+  const stUrl = (process.env.ST_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
+  const stPublicUrl = (process.env.ST_PUBLIC_URL || "https://st.apps.makima.sbs").replace(/\/+$/, "");
+  const tavernProfileDir = path.join(dataDir, "tavern-profile");
+  const tavernAuthPath = path.join(dataDir, "tavern-auth.enc.json");
+  const tavernEnabledEnv = (process.env.TAVERN_ENABLED || "true").trim().toLowerCase();
+  const tavernEnabled = !["0", "false", "no", "off"].includes(tavernEnabledEnv);
+
   return {
     host: process.env.HOST || "127.0.0.1",
     port: Number.parseInt(process.env.PORT || "18660", 10),
@@ -67,6 +79,11 @@ export function loadConfig(): AppConfig {
     agentsConfigPath,
     defaultCwd,
     homeDir: os.homedir(),
+    stUrl,
+    stPublicUrl,
+    tavernProfileDir,
+    tavernAuthPath,
+    tavernEnabled,
   };
 }
 

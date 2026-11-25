@@ -10,23 +10,32 @@ import { registerQuotaRoutes } from "./routes/quotas.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerSettingsRoutes } from "./routes/settings.js";
 import { registerSwarmRoutes } from "./routes/swarms.js";
+import { registerTavernRoutes } from "./routes/tavern.js";
 import { registerUploadRoutes } from "./routes/uploads.js";
 import { SwarmManager } from "./swarm/manager.js";
 import { registerSwarmMcpRoutes } from "./swarm/mcp.js";
+import { TavernBridge } from "./tavern/bridge.js";
+import type { TavernBridgeLike } from "./tavern/types.js";
 
 export interface RelayServerInstance {
   app: FastifyInstance;
   db: RelayDatabase;
   manager: SessionManager;
   swarmManager: SwarmManager;
+  tavernBridge: TavernBridgeLike;
   internalMcpToken: string;
   listen: () => Promise<{ host: string; port: number; baseUrl: string }>;
   close: () => Promise<void>;
 }
 
+export interface CreateRelayServerOptions {
+  tavernBridge?: TavernBridgeLike;
+}
+
 export async function createRelayServer(
   config: AppConfig,
-  agents: AgentProfile[]
+  agents: AgentProfile[],
+  options?: CreateRelayServerOptions
 ): Promise<RelayServerInstance> {
   const db = new RelayDatabase(config.dbPath);
   const manager = new SessionManager(config, db, agents);
@@ -35,6 +44,8 @@ export async function createRelayServer(
   let boundPort = config.port;
   const getBaseUrl = () => `http://127.0.0.1:${boundPort}`;
   const swarmManager = new SwarmManager(config, db, manager, internalMcpToken, getBaseUrl);
+  const tavernBridge: TavernBridgeLike =
+    options?.tavernBridge ?? new TavernBridge(config, db, manager);
 
   const app = Fastify({ logger: false });
 
@@ -60,6 +71,7 @@ export async function createRelayServer(
   registerQuotaRoutes(app, config);
   registerSwarmRoutes(app, swarmManager);
   registerSwarmMcpRoutes(app, swarmManager);
+  registerTavernRoutes(app, config, tavernBridge);
 
   app.get("/ws", { websocket: true }, (socket) => {
     const unsubscribe = manager.subscribe((ev) => {
@@ -90,6 +102,9 @@ export async function createRelayServer(
     if (addr && typeof addr === "object") {
       boundPort = addr.port;
     }
+    if (tavernBridge instanceof TavernBridge && config.tavernEnabled) {
+      tavernBridge.warmup();
+    }
     return {
       host: config.host,
       port: boundPort,
@@ -98,6 +113,7 @@ export async function createRelayServer(
   };
 
   const close = async () => {
+    await tavernBridge.dispose();
     swarmManager.disposeAll();
     await manager.disposeAll();
     await app.close();
@@ -109,6 +125,7 @@ export async function createRelayServer(
     db,
     manager,
     swarmManager,
+    tavernBridge,
     internalMcpToken,
     listen,
     close,
