@@ -153,6 +153,7 @@ struct TavernChatView: View {
                                 Task { await store.runTavernSlash(cmd) }
                             },
                             onSendFromCard: { text in
+                                Haptics.tap(.medium)
                                 Task { await store.sendTavernMessage(text: text) }
                             },
                             onFillDraft: { text in
@@ -178,8 +179,7 @@ struct TavernChatView: View {
             .scrollEdgeEffectStyle(.soft, for: .all)
             .scrollDismissesKeyboard(.interactively)
             .onScrollGeometryChange(for: Bool.self) { geo in
-                let distance = geo.contentSize.height - (geo.contentOffset.y + geo.containerSize.height - geo.contentInsets.bottom)
-                return distance <= 90
+                geo.visibleRect.maxY >= geo.contentSize.height - 90
             } action: { _, atBottom in
                 if atBottom != isAtBottom {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {

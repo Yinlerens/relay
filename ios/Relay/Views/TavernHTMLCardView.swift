@@ -421,6 +421,66 @@ private struct TavernWebViewRepresentable: UIViewRepresentable {
             version: "relay"
           });
 
+          // Persistent extensionSettings + SillyTavern context shims
+          var __extensionSettings = {};
+          var __fillDraftTimer = 0;
+
+          // Off-screen real DOM nodes for send_textarea & send_but so native prototype descriptors & events work
+          var __taDesc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
+          var __nativeTASetter = __taDesc && __taDesc.set;
+          var __nativeTAGetter = __taDesc && __taDesc.get;
+          var __virtualTextarea = document.createElement("textarea");
+          __virtualTextarea.id = "send_textarea";
+
+          function __getTextareaValue() {
+            return __nativeTAGetter
+              ? String(__nativeTAGetter.call(__virtualTextarea) || "")
+              : "";
+          }
+          function __setTextareaValueSilently(v) {
+            var str = (v == null) ? "" : String(v);
+            if (__nativeTASetter) __nativeTASetter.call(__virtualTextarea, str);
+          }
+          function __scheduleFillDraft() {
+            if (__fillDraftTimer) clearTimeout(__fillDraftTimer);
+            __fillDraftTimer = setTimeout(function() {
+              __fillDraftTimer = 0;
+              var current = __getTextareaValue();
+              if (current.length > 0) postFillDraft(current);
+            }, 45);
+          }
+          function __triggerVirtualSend() {
+            if (__fillDraftTimer) {
+              clearTimeout(__fillDraftTimer);
+              __fillDraftTimer = 0;
+            }
+            var toSend = __getTextareaValue().trim();
+            if (toSend.length > 0) {
+              __setTextareaValueSilently("");
+              postSend(toSend);
+            }
+          }
+
+          Object.defineProperty(__virtualTextarea, "value", {
+            configurable: true,
+            get: __getTextareaValue,
+            set: function(v) {
+              __setTextareaValueSilently(v);
+              __scheduleFillDraft();
+            }
+          });
+          __virtualTextarea.addEventListener("input", __scheduleFillDraft);
+          __virtualTextarea.addEventListener("change", __scheduleFillDraft);
+          __virtualTextarea.focus = function() {};
+          __virtualTextarea.blur = function() {};
+
+          var __virtualSendBtn = document.createElement("button");
+          __virtualSendBtn.id = "send_but";
+          __virtualSendBtn.type = "button";
+          __virtualSendBtn.addEventListener("click", function() {
+            __triggerVirtualSend();
+          });
+
           // TavernHelper & SillyTavern context shims
           window.TavernHelper = Object.assign(window.TavernHelper || {}, {
             getVariables: function() { return cloneVars(); },
@@ -433,53 +493,17 @@ private struct TavernWebViewRepresentable: UIViewRepresentable {
             getContext: function() {
               return {
                 chatMetadata: { variables: cloneVars() },
-                extensionSettings: {},
+                extensionSettings: __extensionSettings,
                 characters: [],
                 chat: [],
                 saveSettingsDebounced: function() {},
-                executeSlashCommandsWithOptions: postSlash
+                executeSlashCommandsWithOptions: postSlash,
+                generate: function() { __triggerVirtualSend(); }
               };
             }
           });
           window.triggerSlash = window.triggerSlash || postSlash;
           window.getVariables = window.getVariables || function() { return cloneVars(); };
-
-          // Virtual parent DOM proxy for send_textarea & send_but (cards often fill/click composer)
-          var __draftBuffer = "";
-          var __noopList = { add: function(){}, remove: function(){}, toggle: function(){}, contains: function(){ return false; } };
-          var __virtualTextarea = {
-            id: "send_textarea",
-            tagName: "TEXTAREA",
-            style: {},
-            classList: __noopList,
-            get value() { return __draftBuffer; },
-            set value(v) {
-              __draftBuffer = (v == null) ? "" : String(v);
-              postFillDraft(__draftBuffer);
-            },
-            focus: function() {},
-            blur: function() {},
-            setSelectionRange: function() {},
-            addEventListener: function() {},
-            removeEventListener: function() {},
-            dispatchEvent: function() { return true; }
-          };
-          var __virtualSendBtn = {
-            id: "send_but",
-            tagName: "DIV",
-            style: {},
-            classList: __noopList,
-            click: function() {
-              if (__draftBuffer.trim().length > 0) {
-                var toSend = __draftBuffer;
-                __draftBuffer = "";
-                postSend(toSend);
-              }
-            },
-            addEventListener: function() {},
-            removeEventListener: function() {},
-            dispatchEvent: function() { return true; }
-          };
 
           var __origGetById = Document.prototype.getElementById;
           Document.prototype.getElementById = function(id) {

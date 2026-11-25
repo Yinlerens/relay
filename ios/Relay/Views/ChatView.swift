@@ -74,8 +74,7 @@ struct ChatView: View {
             .scrollEdgeEffectStyle(.soft, for: .all)
             .scrollDismissesKeyboard(.interactively)
             .onScrollGeometryChange(for: Bool.self) { geo in
-                let distance = geo.contentSize.height - (geo.contentOffset.y + geo.containerSize.height - geo.contentInsets.bottom)
-                return distance <= 90
+                geo.visibleRect.maxY >= geo.contentSize.height - 90
             } action: { _, atBottom in
                 if atBottom != isAtBottom {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
