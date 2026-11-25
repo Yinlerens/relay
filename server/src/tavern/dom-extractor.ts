@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import type { TavernChatState, TavernMessage, TavernRenderBlock } from "./types.js";
 
 const ALLOWED_ASSET_PREFIXES = [
@@ -854,3 +856,92 @@ export function buildExtractChatMessagesScript(opts?: {
 }
 
 export const EXTRACT_CHAT_MESSAGES_PAGE_SCRIPT = buildExtractChatMessagesScript({ limit: 25 });
+
+export interface CharacterChatsDiskSnapshot {
+  chatsDir: string;
+  signature: string;
+  newestChatFile: string | null;
+  newestMtimeMs: number;
+}
+
+/**
+ * Lightweight filesystem stat scan of a character's SillyTavern `chats/<charDir>/*.jsonl` files.
+ * Lets Relay detect web-UI writes or newly branched `.jsonl` files in <0.2ms without hitting Playwright.
+ */
+export function readCharacterChatsDiskSnapshot(
+  stDataDir: string | null | undefined,
+  handle: string | null | undefined,
+  avatar: string | null | undefined
+): CharacterChatsDiskSnapshot | null {
+  if (!stDataDir || !avatar) return null;
+  const cleanAvatar = path.basename(avatar.trim());
+  if (!cleanAvatar) return null;
+  const charDirName = cleanAvatar.replace(/\.png$/i, "");
+  if (!charDirName) return null;
+
+  const cleanHandle = (handle || "").trim();
+  const candidates: string[] = [];
+  if (
+    cleanHandle &&
+    !cleanHandle.includes("/") &&
+    !cleanHandle.includes("\\") &&
+    !cleanHandle.includes("..")
+  ) {
+    candidates.push(path.join(stDataDir, cleanHandle));
+  }
+  candidates.push(path.join(stDataDir, "default-user"));
+
+  let chatsDir: string | null = null;
+  for (const userDir of candidates) {
+    const candidateChats = path.join(userDir, "chats", charDirName);
+    try {
+      if (fs.statSync(candidateChats).isDirectory()) {
+        chatsDir = candidateChats;
+        break;
+      }
+    } catch {
+      // try next fallback user dir
+    }
+  }
+  if (!chatsDir) return null;
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(chatsDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const files: Array<{ cleanName: string; size: number; mtimeMs: number }> = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".jsonl")) continue;
+    try {
+      const st = fs.statSync(path.join(chatsDir, entry.name));
+      files.push({
+        cleanName: entry.name.slice(0, -6),
+        size: st.size,
+        mtimeMs: Math.floor(st.mtimeMs),
+      });
+    } catch {
+      // ignore transient rename/unlink
+    }
+  }
+  files.sort((a, b) => a.cleanName.localeCompare(b.cleanName));
+
+  let newestChatFile: string | null = null;
+  let newestMtimeMs = -1;
+  for (const f of files) {
+    if (f.mtimeMs > newestMtimeMs) {
+      newestMtimeMs = f.mtimeMs;
+      newestChatFile = `${f.cleanName}.jsonl`;
+    }
+  }
+
+  const signature = files.map((f) => `${f.cleanName}:${f.size}:${f.mtimeMs}`).join("|");
+  return {
+    chatsDir,
+    signature,
+    newestChatFile,
+    newestMtimeMs: newestMtimeMs >= 0 ? newestMtimeMs : 0,
+  };
+}

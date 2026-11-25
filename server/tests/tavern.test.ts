@@ -14,6 +14,7 @@ import {
   buildTavernAvatarUrl,
   cleanIframeDocumentHtml,
   finalizeExtractedMessages,
+  readCharacterChatsDiskSnapshot,
   rewriteHtmlAssetUrls,
   sanitizeStAssetPath,
   type RawExtractedMessage,
@@ -1022,5 +1023,43 @@ describe("Tavern Bridge Utilities & Routes", () => {
     assert.deepEqual(streamingDiff.unchangedMesIds, [0, 1]);
     assert.deepEqual(streamingDiff.messages.map((m) => m.mesId), [2]);
     assert.equal(streamingDiff.messages[0].isStreaming, true);
+  });
+
+  it("detects web-UI writes and newly branched .jsonl files via disk snapshot fingerprint", () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-st-disk-snap-"));
+    const defaultChatsDir = path.join(tmpDir, "default-user", "chats", "TestChar");
+    fs.mkdirSync(defaultChatsDir, { recursive: true });
+
+    const chatA = path.join(defaultChatsDir, "TestChar - Chat A.jsonl");
+    fs.writeFileSync(chatA, "{\"mes\":\"one\"}\n");
+    fs.utimesSync(chatA, new Date(1_700_000_000_000), new Date(1_700_000_000_000));
+
+    // Falls back from unknown handle -> default-user and excludes non-.jsonl files
+    fs.writeFileSync(path.join(defaultChatsDir, "notes.txt"), "ignore");
+    const snap1 = readCharacterChatsDiskSnapshot(tmpDir, "missing-handle", "TestChar.png");
+    assert.ok(snap1);
+    assert.equal(snap1.newestChatFile, "TestChar - Chat A.jsonl");
+    assert.ok(!snap1.signature.includes("notes"));
+
+    // Web UI appends a message -> size changes -> signature changes immediately
+    fs.appendFileSync(chatA, "{\"mes\":\"two\"}\n");
+    const snap2 = readCharacterChatsDiskSnapshot(tmpDir, "missing-handle", "TestChar.png");
+    assert.ok(snap2);
+    assert.notEqual(snap2.signature, snap1.signature);
+
+    // Web UI creates a new branch -> Branch #1 detected with newer mtime
+    const branchFile = path.join(defaultChatsDir, "TestChar - Chat A - Branch #1.jsonl");
+    fs.writeFileSync(branchFile, "{\"mes\":\"branch\"}\n");
+    const newerTime = new Date(Date.now() + 5_000);
+    fs.utimesSync(branchFile, newerTime, newerTime);
+    const snap3 = readCharacterChatsDiskSnapshot(tmpDir, null, "TestChar.png");
+    assert.ok(snap3);
+    assert.notEqual(snap3.signature, snap2.signature);
+    assert.equal(snap3.newestChatFile, "TestChar - Chat A - Branch #1.jsonl");
+
+    // Handles invalid / empty inputs safely without throwing
+    assert.equal(readCharacterChatsDiskSnapshot(null, null, "TestChar.png"), null);
+    assert.equal(readCharacterChatsDiskSnapshot(tmpDir, null, ""), null);
+    assert.equal(readCharacterChatsDiskSnapshot(tmpDir, null, "NonExistent.png"), null);
   });
 });

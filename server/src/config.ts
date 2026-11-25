@@ -28,6 +28,7 @@ export interface AppConfig {
   tavernProfileDir: string;
   tavernAuthPath: string;
   tavernEnabled: boolean;
+  stDataDir?: string | null;
 }
 
 export function loadConfig(): AppConfig {
@@ -68,6 +69,13 @@ export function loadConfig(): AppConfig {
   const tavernAuthPath = path.join(dataDir, "tavern-auth.enc.json");
   const tavernEnabledEnv = (process.env.TAVERN_ENABLED || "true").trim().toLowerCase();
   const tavernEnabled = !["0", "false", "no", "off"].includes(tavernEnabledEnv);
+  const rawStDataDir = (process.env.ST_DATA_DIR || "").trim();
+  let stDataDir: string | null = null;
+  if (rawStDataDir) {
+    stDataDir = path.resolve(rawStDataDir);
+  } else if (fs.existsSync("/opt/sillytavern/data")) {
+    stDataDir = "/opt/sillytavern/data";
+  }
 
   return {
     host: process.env.HOST || "127.0.0.1",
@@ -84,6 +92,7 @@ export function loadConfig(): AppConfig {
     tavernProfileDir,
     tavernAuthPath,
     tavernEnabled,
+    stDataDir,
   };
 }
 

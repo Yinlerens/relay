@@ -10,6 +10,7 @@ import {
   buildTavernAvatarUrl,
   finalizeExtractedMessages,
   normalizeChatFileName,
+  readCharacterChatsDiskSnapshot,
   type RawExtractedMessage,
 } from "./dom-extractor.js";
 import type {
@@ -91,6 +92,7 @@ export class TavernBridge implements TavernBridgeLike {
   private handle: string | null = null;
   private currentCharacterId: number | null = null;
   private currentCharacterName: string | null = null;
+  private currentCharacterAvatar: string | null = null;
   private currentChatFile: string | null = null;
   private isGenerating = false;
   private lastError: string | null = null;
@@ -105,6 +107,15 @@ export class TavernBridge implements TavernBridgeLike {
   private lastDeltaKey = "";
   private generationStartedAt = 0;
   private sawLiveGenerating = false;
+
+  private lastSyncedDiskSig = "";
+  private lastSyncedCharAvatar = "";
+  private localWriteGraceUntil = 0;
+  private externalSyncPollTimer: NodeJS.Timeout | null = null;
+  private externalSyncDebounceTimer: NodeJS.Timeout | null = null;
+  private postLocalSnapshotTimer: NodeJS.Timeout | null = null;
+  private externalSyncPendingSig = "";
+  private externalSyncInFlight = false;
 
   constructor(
     private readonly config: AppConfig,
@@ -204,6 +215,7 @@ export class TavernBridge implements TavernBridgeLike {
           this.generationStartedAt = 0;
           this.stopStreamPolling();
           this.clearFinalizationTimers();
+          this.stopExternalChatWatcher();
           if (!this.disposed) {
             this.emitStatus();
           }
@@ -244,6 +256,8 @@ export class TavernBridge implements TavernBridgeLike {
       }
       await this.bindPageEvents();
       await this.syncCurrentSelectionMeta();
+      this.captureBaselineDiskSnapshot();
+      this.startExternalChatWatcher();
       this.emitStatus();
     };
 
@@ -463,12 +477,13 @@ export class TavernBridge implements TavernBridgeLike {
       const meta = await page.evaluate<{
         characterId: number | null;
         characterName: string | null;
+        characterAvatar: string | null;
         chatFile: string | null;
         isLiveGenerating: boolean;
       }>(`(() => {
         const st = window.SillyTavern;
         const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
-        if (!ctx) return { characterId: null, characterName: null, chatFile: null, isLiveGenerating: false };
+        if (!ctx) return { characterId: null, characterName: null, characterAvatar: null, chatFile: null, isLiveGenerating: false };
         const rawId = ctx.characterId;
         const idNum = rawId !== undefined && rawId !== null && rawId !== "" ? Number(rawId) : NaN;
         const ch = Number.isFinite(idNum) && Array.isArray(ctx.characters) ? ctx.characters[idNum] : null;
@@ -487,16 +502,314 @@ export class TavernBridge implements TavernBridgeLike {
         return {
           characterId: ch ? idNum : null,
           characterName: ch ? String(ch.name || "") : null,
+          characterAvatar: ch && ch.avatar ? String(ch.avatar) : null,
           chatFile: chatId ? String(chatId) : (ch && ch.chat ? String(ch.chat) : null),
           isLiveGenerating,
         };
       })()`);
       this.currentCharacterId = meta.characterId;
       this.currentCharacterName = meta.characterName;
+      this.currentCharacterAvatar = meta.characterAvatar;
       this.currentChatFile = meta.chatFile;
       this.reconcileLiveGenerating(meta.isLiveGenerating);
     } catch {
       // ignore transient eval error
+    }
+  }
+
+  private captureBaselineDiskSnapshot(): void {
+    const snap = readCharacterChatsDiskSnapshot(
+      this.config.stDataDir,
+      this.handle,
+      this.currentCharacterAvatar
+    );
+    this.lastSyncedCharAvatar = this.currentCharacterAvatar ?? "";
+    this.lastSyncedDiskSig = snap?.signature ?? "";
+  }
+
+  private markLocalMutationAndSnapshot(): void {
+    this.localWriteGraceUntil = Date.now() + 2_500;
+    this.captureBaselineDiskSnapshot();
+    if (this.postLocalSnapshotTimer) {
+      clearTimeout(this.postLocalSnapshotTimer);
+    }
+    this.postLocalSnapshotTimer = setTimeout(() => {
+      this.postLocalSnapshotTimer = null;
+      if (!this.disposed && this.ready) {
+        this.captureBaselineDiskSnapshot();
+      }
+    }, 1400);
+    this.postLocalSnapshotTimer.unref();
+  }
+
+  private stopExternalChatWatcher(): void {
+    if (this.externalSyncPollTimer) {
+      clearInterval(this.externalSyncPollTimer);
+      this.externalSyncPollTimer = null;
+    }
+    if (this.externalSyncDebounceTimer) {
+      clearTimeout(this.externalSyncDebounceTimer);
+      this.externalSyncDebounceTimer = null;
+    }
+    if (this.postLocalSnapshotTimer) {
+      clearTimeout(this.postLocalSnapshotTimer);
+      this.postLocalSnapshotTimer = null;
+    }
+    this.externalSyncPendingSig = "";
+    this.externalSyncInFlight = false;
+  }
+
+  private startExternalChatWatcher(): void {
+    if (this.externalSyncPollTimer || !this.config.stDataDir || this.disposed) return;
+    this.externalSyncPollTimer = setInterval(() => {
+      if (
+        this.disposed ||
+        !this.ready ||
+        this.isGenerating ||
+        this.externalSyncInFlight ||
+        Date.now() < this.localWriteGraceUntil ||
+        this.currentCharacterId === null ||
+        !this.currentCharacterAvatar
+      ) {
+        return;
+      }
+      const snap = readCharacterChatsDiskSnapshot(
+        this.config.stDataDir,
+        this.handle,
+        this.currentCharacterAvatar
+      );
+      if (!snap) return;
+      if (this.lastSyncedCharAvatar !== this.currentCharacterAvatar) {
+        this.lastSyncedCharAvatar = this.currentCharacterAvatar;
+        this.lastSyncedDiskSig = snap.signature;
+        return;
+      }
+      if (snap.signature === this.lastSyncedDiskSig) return;
+      if (snap.signature === this.externalSyncPendingSig && this.externalSyncDebounceTimer) {
+        return;
+      }
+
+      this.externalSyncPendingSig = snap.signature;
+      if (this.externalSyncDebounceTimer) {
+        clearTimeout(this.externalSyncDebounceTimer);
+      }
+      this.externalSyncDebounceTimer = setTimeout(() => {
+        this.externalSyncDebounceTimer = null;
+        this.externalSyncPendingSig = "";
+        if (this.disposed || !this.ready || this.isGenerating || this.externalSyncInFlight) return;
+        this.externalSyncInFlight = true;
+        void this.enqueue(async () => {
+          const reloaded = await this.syncExternalChatIfStale({ allowChatSwitch: true });
+          if (reloaded) {
+            const state = await this.extractChatState();
+            this.sessionManager.emitExternal("tavern_chat_updated", "tavern", { state });
+          }
+        })
+          .catch(() => {})
+          .finally(() => {
+            this.externalSyncInFlight = false;
+          });
+      }, 600);
+      this.externalSyncDebounceTimer.unref();
+    }, 2500);
+    this.externalSyncPollTimer.unref();
+  }
+
+  /**
+   * Checks whether SillyTavern's backend/disk state for the active character changed externally
+   * (e.g., user sent a message or created a branch in the web UI) and reloads Playwright in-place.
+   * Must ONLY be called from inside `this.enqueue(...)` (never calls `enqueue` itself).
+   */
+  private async syncExternalChatIfStale(opts?: {
+    allowChatSwitch?: boolean;
+    targetChatFile?: string;
+    forceCheckApi?: boolean;
+  }): Promise<boolean> {
+    if (
+      this.disposed ||
+      !this.ready ||
+      !this.page ||
+      this.page.isClosed() ||
+      this.isGenerating ||
+      this.currentCharacterId === null
+    ) {
+      return false;
+    }
+
+    const snap = readCharacterChatsDiskSnapshot(
+      this.config.stDataDir,
+      this.handle,
+      this.currentCharacterAvatar
+    );
+
+    if (
+      snap &&
+      !opts?.forceCheckApi &&
+      this.currentCharacterAvatar &&
+      this.lastSyncedCharAvatar === this.currentCharacterAvatar &&
+      snap.signature === this.lastSyncedDiskSig
+    ) {
+      return false;
+    }
+
+    const inGraceWindow = Date.now() < this.localWriteGraceUntil;
+
+    try {
+      const check = await this.page.evaluate<
+        {
+          ok: boolean;
+          chatFileChanged: boolean;
+          countChanged: boolean;
+          lastTextChanged: boolean;
+          targetChat: string;
+        },
+        {
+          characterId: number;
+          allowChatSwitch: boolean;
+          targetChatFile?: string;
+        }
+      >(
+        async ({ characterId, allowChatSwitch, targetChatFile }) => {
+          const g = globalThis as Record<string, any>;
+          const st = g.SillyTavern;
+          const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
+          if (!ctx || !Array.isArray(ctx.characters) || !ctx.characters[characterId]) {
+            return {
+              ok: false,
+              chatFileChanged: false,
+              countChanged: false,
+              lastTextChanged: false,
+              targetChat: "",
+            };
+          }
+          const norm = (s: unknown) =>
+            String(s || "")
+              .trim()
+              .replace(/\.jsonl$/i, "");
+          const ch = ctx.characters[characterId];
+          const memChat = norm(
+            (typeof ctx.getCurrentChatId === "function" ? ctx.getCurrentChatId() : ctx.chatId) ||
+              ch.chat ||
+              ""
+          );
+          const memCount = Array.isArray(ctx.chat) ? ctx.chat.length : 0;
+          const memLastMes = memCount > 0 ? String(ctx.chat[memCount - 1]?.mes || "") : "";
+
+          let activeChat = memChat;
+          try {
+            const charRes = await fetch("/api/characters/get", {
+              method: "POST",
+              headers: ctx.getRequestHeaders(),
+              body: JSON.stringify({ avatar_url: ch.avatar }),
+            });
+            if (charRes.ok) {
+              const freshChar = (await charRes.json()) as Record<string, any>;
+              const fetchedChat = norm(freshChar?.chat);
+              if (fetchedChat) activeChat = fetchedChat;
+            }
+          } catch {
+            // keep memChat on transient error
+          }
+
+          const requestedNorm = norm(targetChatFile);
+          const resolvedTarget =
+            requestedNorm || (allowChatSwitch && activeChat ? activeChat : memChat);
+
+          let diskCount: number | null = null;
+          let diskLastMes: string | null = null;
+          try {
+            const chatsRes = await fetch("/api/characters/chats", {
+              method: "POST",
+              headers: ctx.getRequestHeaders(),
+              body: JSON.stringify({ avatar_url: ch.avatar }),
+            });
+            if (chatsRes.ok) {
+              const data = (await chatsRes.json()) as Record<string, any> | Array<Record<string, any>>;
+              const items = Array.isArray(data) ? data : Object.values(data || {});
+              const matched = items.find((x) => x && norm(x.file_name) === resolvedTarget);
+              if (matched) {
+                if (matched.chat_items !== undefined && matched.chat_items !== null) {
+                  const n = Number(matched.chat_items);
+                  if (Number.isFinite(n)) diskCount = n;
+                }
+                if (typeof matched.mes === "string") {
+                  diskLastMes = matched.mes;
+                }
+              }
+            }
+          } catch {
+            // ignore transient /chats error
+          }
+
+          const chatFileChanged = Boolean(resolvedTarget && resolvedTarget !== memChat);
+          const countChanged = diskCount !== null && diskCount !== memCount;
+          let lastTextChanged = false;
+          if (diskLastMes !== null) {
+            const sameExact = diskLastMes === memLastMes;
+            const samePrefix =
+              diskLastMes.length >= 40 && memLastMes.startsWith(diskLastMes);
+            lastTextChanged = !sameExact && !samePrefix;
+          }
+
+          return {
+            ok: true,
+            chatFileChanged,
+            countChanged,
+            lastTextChanged,
+            targetChat: resolvedTarget,
+          };
+        },
+        {
+          characterId: this.currentCharacterId,
+          allowChatSwitch: opts?.allowChatSwitch !== false,
+          targetChatFile: opts?.targetChatFile,
+        }
+      );
+
+      if (!check.ok) return false;
+
+      const hasApiDiff = check.chatFileChanged || check.countChanged || check.lastTextChanged;
+      if (inGraceWindow && !hasApiDiff) {
+        this.captureBaselineDiskSnapshot();
+        return false;
+      }
+      if (!snap && !hasApiDiff) {
+        return false;
+      }
+
+      if (hasApiDiff || snap) {
+        await this.page.evaluate<
+          void,
+          { characterId: number; targetChat: string; chatFileChanged: boolean }
+        >(
+          async ({ characterId, targetChat, chatFileChanged }) => {
+            const g = globalThis as Record<string, any>;
+            const st = g.SillyTavern;
+            const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
+            if (!ctx || !Array.isArray(ctx.characters) || !ctx.characters[characterId]) return;
+            if (chatFileChanged && targetChat) {
+              ctx.characters[characterId].chat = targetChat;
+            }
+            if (typeof ctx.reloadCurrentChat === "function") {
+              await ctx.reloadCurrentChat();
+            }
+          },
+          {
+            characterId: this.currentCharacterId,
+            targetChat: check.targetChat,
+            chatFileChanged: check.chatFileChanged,
+          }
+        );
+
+        await new Promise((r) => setTimeout(r, 350));
+        await this.syncCurrentSelectionMeta();
+        this.captureBaselineDiskSnapshot();
+        return true;
+      }
+
+      return false;
+    } catch {
+      return false;
     }
   }
 
@@ -758,6 +1071,7 @@ export class TavernBridge implements TavernBridgeLike {
         });
       }
       this.emitStatus();
+      this.markLocalMutationAndSnapshot();
 
       if (notifyBark && lastMsg && !lastMsg.isUser) {
         const barkUrl = this.db.getSetting("bark_url");
@@ -974,12 +1288,42 @@ export class TavernBridge implements TavernBridgeLike {
       await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
       await this.waitForAppOrLogin(false);
       const characters = this.ready ? await this.extractCharactersInternal() : [];
+      this.markLocalMutationAndSnapshot();
       return { status: this.buildStatus(), characters };
     });
   }
 
   async listCharacters(): Promise<{ status: TavernStatus; characters: TavernCharacter[] }> {
     await this.ensureInitialized();
+    if (this.ready && this.page && !this.page.isClosed() && !this.isGenerating) {
+      await this.page
+        .evaluate(`(async () => {
+          const st = window.SillyTavern;
+          const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
+          if (!ctx || !Array.isArray(ctx.characters)) return;
+          const res = await fetch("/api/characters/all", {
+            method: "POST",
+            headers: ctx.getRequestHeaders(),
+            body: JSON.stringify({}),
+          });
+          if (!res.ok) return;
+          const freshList = await res.json();
+          if (!Array.isArray(freshList)) return;
+          const byAvatar = new Map();
+          for (const item of freshList) {
+            if (item && item.avatar) byAvatar.set(String(item.avatar), item);
+          }
+          for (const ch of ctx.characters) {
+            if (!ch || !ch.avatar) continue;
+            const fresh = byAvatar.get(String(ch.avatar));
+            if (!fresh) continue;
+            if (fresh.chat) ch.chat = String(fresh.chat);
+            if (fresh.date_last_chat !== undefined) ch.date_last_chat = fresh.date_last_chat;
+            if (fresh.last_mes !== undefined) ch.last_mes = fresh.last_mes;
+          }
+        })()`)
+        .catch(() => {});
+    }
     const characters = this.ready ? await this.extractCharactersInternal() : [];
     return { status: this.buildStatus(), characters };
   }
@@ -1065,7 +1409,13 @@ export class TavernBridge implements TavernBridgeLike {
         this.currentCharacterId === input.characterId &&
         (!requestedChat || requestedChat === currentChat);
 
-      if (!hitFastPath) {
+      let externallyReloaded = false;
+      if (hitFastPath) {
+        externallyReloaded = await this.syncExternalChatIfStale({
+          allowChatSwitch: !requestedChat,
+          targetChatFile: requestedChat || undefined,
+        });
+      } else {
         await this.page.evaluate<
           void,
           { characterId: number; chatFile?: string; createNew?: boolean }
@@ -1098,6 +1448,9 @@ export class TavernBridge implements TavernBridgeLike {
 
       const fullState = await this.extractChatState();
       if (!hitFastPath) {
+        this.markLocalMutationAndSnapshot();
+      }
+      if (!hitFastPath || externallyReloaded) {
         this.sessionManager.emitExternal("tavern_chat_updated", "tavern", { state: fullState });
       }
 
@@ -1123,6 +1476,14 @@ export class TavernBridge implements TavernBridgeLike {
         },
       };
     }
+    if (options?.beforeMesId === undefined) {
+      return this.enqueue(async () => {
+        await this.ensureInitialized();
+        await this.syncExternalChatIfStale({ allowChatSwitch: true });
+        const state = await this.extractChatState(options);
+        return { state };
+      });
+    }
     await this.ensureInitialized();
     const state = await this.extractChatState(options);
     return { state };
@@ -1139,6 +1500,8 @@ export class TavernBridge implements TavernBridgeLike {
         throw httpError(409, "Tavern is not logged in");
       }
 
+      await this.syncExternalChatIfStale({ allowChatSwitch: true });
+
       await this.page.evaluate<void, string>((msgText) => {
         const g = globalThis as Record<string, any>;
         const doc = g.document;
@@ -1154,6 +1517,7 @@ export class TavernBridge implements TavernBridgeLike {
 
       await new Promise((r) => setTimeout(r, 180));
       const state = await this.extractChatState();
+      this.markLocalMutationAndSnapshot();
       this.sessionManager.emitExternal("tavern_chat_updated", "tavern", { state });
       return { ok: true, state };
     });
@@ -1197,6 +1561,7 @@ export class TavernBridge implements TavernBridgeLike {
       if (!this.ready || !this.page) {
         throw httpError(409, "Tavern is not logged in");
       }
+      await this.syncExternalChatIfStale({ allowChatSwitch: true });
       await this.page.evaluate(`(() => {
         const st = window.SillyTavern;
         const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
@@ -1217,6 +1582,7 @@ export class TavernBridge implements TavernBridgeLike {
       if (!this.ready || !this.page) {
         throw httpError(409, "Tavern is not logged in");
       }
+      await this.syncExternalChatIfStale({ allowChatSwitch: true });
       await this.page.evaluate(`(() => {
         const st = window.SillyTavern;
         const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
@@ -1296,6 +1662,7 @@ export class TavernBridge implements TavernBridgeLike {
       await new Promise((r) => setTimeout(r, 280));
       const state = await this.extractChatState();
       const message = state.messages.find((m) => m.mesId === mesId) ?? null;
+      this.markLocalMutationAndSnapshot();
       this.sessionManager.emitExternal("tavern_chat_updated", "tavern", { state });
       return { message, state };
     });
@@ -1344,6 +1711,7 @@ export class TavernBridge implements TavernBridgeLike {
       await new Promise((r) => setTimeout(r, 250));
       const state = await this.extractChatState();
       const message = state.messages.find((m) => m.mesId === mesId) ?? null;
+      this.markLocalMutationAndSnapshot();
       this.sessionManager.emitExternal("tavern_chat_updated", "tavern", { state });
       return { message, state };
     });
@@ -1378,6 +1746,7 @@ export class TavernBridge implements TavernBridgeLike {
 
       await new Promise((r) => setTimeout(r, 250));
       const state = await this.extractChatState();
+      this.markLocalMutationAndSnapshot();
       this.sessionManager.emitExternal("tavern_chat_updated", "tavern", { state });
       return { ok: true, state };
     });
@@ -1410,6 +1779,7 @@ export class TavernBridge implements TavernBridgeLike {
 
       await new Promise((r) => setTimeout(r, 250));
       const state = await this.extractChatState();
+      this.markLocalMutationAndSnapshot();
       this.sessionManager.emitExternal("tavern_chat_updated", "tavern", { state });
       return { ok: true, ...(result !== undefined ? { result } : {}), state };
     });
@@ -1429,6 +1799,7 @@ export class TavernBridge implements TavernBridgeLike {
     this.disposed = true;
     this.stopStreamPolling();
     this.clearFinalizationTimers();
+    this.stopExternalChatWatcher();
     const ctx = this.context;
     this.context = null;
     this.page = null;
