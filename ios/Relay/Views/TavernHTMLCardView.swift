@@ -51,7 +51,7 @@ final class TavernHTMLHeightCache {
     private func scheduleSave() {
         saveTask?.cancel()
         saveTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            try? await Task.sleep(for: .milliseconds(500))
             guard let self, !Task.isCancelled else { return }
             var snapshot: [String: Double] = [:]
             snapshot.reserveCapacity(self.heights.count)
@@ -65,6 +65,7 @@ final class TavernHTMLHeightCache {
 
 // MARK: - Weak WKScriptMessageHandler wrapper (prevents retain cycles)
 
+@MainActor
 private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
     weak var delegate: WKScriptMessageHandler?
 
@@ -93,6 +94,7 @@ struct TavernHTMLCardView: View {
 
     @Environment(AppStore.self) private var store
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.openURL) private var openURL
     @State private var measuredHeight: CGFloat = 120
 
     private var cacheKey: String {
@@ -119,6 +121,7 @@ struct TavernHTMLCardView: View {
                     variablesJSON: variablesJSON,
                     mvuDataJSON: mvuDataJSON,
                     isDark: colorScheme == .dark,
+                    openURL: openURL,
                     onHeightChange: { newHeight in
                         let clamped = min(max(newHeight, 32), 4000)
                         TavernHTMLHeightCache.shared.store(clamped, for: cacheKey)
@@ -154,6 +157,7 @@ private struct TavernWebViewRepresentable: UIViewRepresentable {
     let variablesJSON: String
     let mvuDataJSON: String
     let isDark: Bool
+    let openURL: OpenURLAction
     var onHeightChange: (CGFloat) -> Void
     var onSlash: (String) -> Void
     var onSend: (String) -> Void
@@ -162,6 +166,7 @@ private struct TavernWebViewRepresentable: UIViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator(
             api: api,
+            openURL: openURL,
             onHeightChange: onHeightChange,
             onSlash: onSlash,
             onSend: onSend,
@@ -197,6 +202,7 @@ private struct TavernWebViewRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
+        context.coordinator.openURL = openURL
         context.coordinator.onHeightChange = onHeightChange
         context.coordinator.onSlash = onSlash
         context.coordinator.onSend = onSend
@@ -632,8 +638,10 @@ private struct TavernWebViewRepresentable: UIViewRepresentable {
 
     // MARK: Coordinator
 
+    @MainActor
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         let schemeHandler: TavernAssetSchemeHandler
+        var openURL: OpenURLAction
         var onHeightChange: (CGFloat) -> Void
         var onSlash: (String) -> Void
         var onSend: (String) -> Void
@@ -642,12 +650,14 @@ private struct TavernWebViewRepresentable: UIViewRepresentable {
 
         init(
             api: RelayAPI,
+            openURL: OpenURLAction,
             onHeightChange: @escaping (CGFloat) -> Void,
             onSlash: @escaping (String) -> Void,
             onSend: @escaping (String) -> Void,
             onFillDraft: @escaping (String) -> Void
         ) {
             self.schemeHandler = TavernAssetSchemeHandler(api: api)
+            self.openURL = openURL
             self.onHeightChange = onHeightChange
             self.onSlash = onSlash
             self.onSend = onSend
@@ -659,26 +669,26 @@ private struct TavernWebViewRepresentable: UIViewRepresentable {
             case "relayHeight":
                 if let num = message.body as? NSNumber {
                     let h = CGFloat(num.doubleValue)
-                    DispatchQueue.main.async {
-                        self.onHeightChange(h)
+                    Task { @MainActor [weak self] in
+                        self?.onHeightChange(h)
                     }
                 }
             case "relaySlash":
                 if let cmd = message.body as? String, !cmd.isEmpty {
-                    DispatchQueue.main.async {
-                        self.onSlash(cmd)
+                    Task { @MainActor [weak self] in
+                        self?.onSlash(cmd)
                     }
                 }
             case "relaySend":
                 if let text = message.body as? String, !text.isEmpty {
-                    DispatchQueue.main.async {
-                        self.onSend(text)
+                    Task { @MainActor [weak self] in
+                        self?.onSend(text)
                     }
                 }
             case "relayFillDraft":
                 if let text = message.body as? String {
-                    DispatchQueue.main.async {
-                        self.onFillDraft(text)
+                    Task { @MainActor [weak self] in
+                        self?.onFillDraft(text)
                     }
                 }
             default:
@@ -688,18 +698,16 @@ private struct TavernWebViewRepresentable: UIViewRepresentable {
 
         func webView(
             _ webView: WKWebView,
-            decidePolicyFor navigationAction: WKNavigationAction,
-            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
-        ) {
+            decidePolicyFor navigationAction: WKNavigationAction
+        ) async -> WKNavigationActionPolicy {
             if navigationAction.navigationType == .linkActivated,
                let url = navigationAction.request.url,
                let scheme = url.scheme?.lowercased(),
                scheme == "http" || scheme == "https" {
-                UIApplication.shared.open(url)
-                decisionHandler(.cancel)
-                return
+                openURL(url)
+                return .cancel
             }
-            decisionHandler(.allow)
+            return .allow
         }
     }
 }

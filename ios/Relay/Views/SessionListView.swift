@@ -9,9 +9,11 @@ struct SessionGroup: Identifiable {
 
 struct SessionListView: View {
     @Environment(AppStore.self) private var store
-    @State private var path = NavigationPath()
+    @State private var agentPath = NavigationPath()
+    @State private var tavernPath = NavigationPath()
     @State private var sessionTrail: [String] = []
-    @State private var search = ""
+    @State private var agentSearch = ""
+    @State private var tavernSearch = ""
     @State private var showSettings = false
     @State private var showNewSession = false
     @State private var showNewSwarm = false
@@ -19,11 +21,10 @@ struct SessionListView: View {
     @State private var renameTarget: SessionSummary?
     @State private var renameText = ""
     @State private var showRename = false
-    @Namespace private var sectionSwitchNamespace
 
     private var filtered: [SessionSummary] {
         let base = store.topLevelSessions
-        let query = search.trimmingCharacters(in: .whitespaces).lowercased()
+        let query = agentSearch.trimmingCharacters(in: .whitespaces).lowercased()
         guard !query.isEmpty else { return base }
         return base.filter { s in
             if s.title.lowercased().contains(query) { return true }
@@ -61,36 +62,84 @@ struct SessionListView: View {
     }
 
     var body: some View {
-        NavigationStack(path: $path) {
-            Group {
-                if store.homeSection == .agent {
-                    agentList
-                } else {
-                    TavernCharacterListView(search: search, header: { topHeader }) { characterId in
-                        openTavern(characterId: characterId)
-                    }
+        @Bindable var bindableStore = store
+
+        TabView(selection: $bindableStore.homeSection) {
+            Tab("Agent", systemImage: "sparkles", value: HomeSection.agent) {
+                agentTab
+            }
+
+            Tab("酒馆", systemImage: "book.pages.fill", value: HomeSection.tavern) {
+                tavernTab
+            }
+        }
+        .tabBarMinimizeBehavior(.onScrollDown)
+        .tint(store.homeSection == .tavern ? TavernTheme.tint : nil)
+        .onChange(of: store.homeSection) { _, newSection in
+            Haptics.selection()
+            if newSection == .tavern && store.tavernStatus == nil {
+                Task { await store.loadTavernOverview() }
+            }
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
+        }
+        .sheet(isPresented: $showNewSession) {
+            NewSessionSheet { created in
+                openSession(created.id)
+            }
+        }
+        .sheet(isPresented: $showNewSwarm) {
+            NewSwarmSheet { created in
+                openSession(created.session.id)
+            }
+        }
+        .sheet(isPresented: $showQuota) {
+            QuotaSheet()
+        }
+        .onChange(of: store.pendingOpenSessionId) { _, targetId in
+            guard let targetId else { return }
+            store.pendingOpenSessionId = nil
+            store.homeSection = .agent
+            openSession(targetId)
+        }
+        .onChange(of: agentPath.count) { _, newCount in
+            if newCount < sessionTrail.count {
+                sessionTrail = Array(sessionTrail.prefix(newCount))
+            }
+        }
+        .task(id: store.hasBootstrapped) {
+            if store.hasBootstrapped && store.quotas == nil {
+                await store.loadQuotas()
+            }
+        }
+        .alert("重命名会话", isPresented: $showRename) {
+            TextField("会话标题", text: $renameText)
+            Button("取消", role: .cancel) {}
+            Button("保存") {
+                if let target = renameTarget {
+                    let title = renameText
+                    Task { await store.rename(target.id, to: title) }
                 }
             }
-            .background(AmbientBackground(tint: store.homeSection == .tavern ? TavernTheme.glow : nil))
-            .navigationTitle(store.homeSection == .agent ? "Relay" : "酒馆")
-            .navigationBarTitleDisplayMode(.large)
-            .searchable(
-                text: $search,
-                placement: .navigationBarDrawer(displayMode: .automatic),
-                prompt: store.homeSection == .agent ? "搜索会话" : "搜索角色"
-            )
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        showSettings = true
-                        Haptics.tap()
-                    } label: {
-                        Image(systemName: "gearshape")
-                    }
-                    .accessibilityLabel("设置")
-                }
+        }
+    }
 
-                if store.homeSection == .agent {
+    // MARK: Tabs
+
+    private var agentTab: some View {
+        NavigationStack(path: $agentPath) {
+            agentList
+                .background(AmbientBackground(tint: nil))
+                .navigationTitle("Relay")
+                .navigationBarTitleDisplayMode(.large)
+                .searchable(
+                    text: $agentSearch,
+                    placement: .navigationBarDrawer(displayMode: .automatic),
+                    prompt: "搜索会话"
+                )
+                .toolbar {
+                    settingsToolbarItem
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
                             showQuota = true
@@ -126,105 +175,87 @@ struct SessionListView: View {
                         }
                         .accessibilityLabel("新建会话")
                     }
-                } else {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Menu {
-                            Button {
-                                Task { await store.reloadTavern() }
-                            } label: {
-                                Label("同步原版配置", systemImage: "arrow.triangle.2.circlepath")
-                            }
-                            .disabled(store.isReloadingTavern)
+                }
+                .navigationDestination(for: String.self) { sessionId in
+                    ChatView(sessionId: sessionId)
+                        .toolbar(.hidden, for: .tabBar)
+                }
+        }
+    }
 
-                            if let publicURL = store.tavernStatus?.publicURL {
-                                Link(destination: publicURL) {
-                                    Label("在浏览器打开原版网页", systemImage: "safari")
-                                }
-                            }
-
-                            Divider()
-
-                            Button {
-                                Task { await store.loadTavernOverview() }
-                            } label: {
-                                Label("刷新角色列表", systemImage: "arrow.clockwise")
-                            }
+    private var tavernTab: some View {
+        NavigationStack(path: $tavernPath) {
+            TavernCharacterListView(search: tavernSearch, header: { statusHeader }) { characterId in
+                openTavern(characterId: characterId)
+            }
+            .background(AmbientBackground(tint: TavernTheme.glow))
+            .navigationTitle("酒馆")
+            .navigationBarTitleDisplayMode(.large)
+            .searchable(
+                text: $tavernSearch,
+                placement: .navigationBarDrawer(displayMode: .automatic),
+                prompt: "搜索角色"
+            )
+            .toolbar {
+                settingsToolbarItem
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            Task { await store.reloadTavern() }
                         } label: {
-                            if store.isReloadingTavern {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Image(systemName: "ellipsis.circle")
+                            Label("同步原版配置", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .disabled(store.isReloadingTavern)
+
+                        if let publicURL = store.tavernStatus?.publicURL {
+                            Link(destination: publicURL) {
+                                Label("在浏览器打开原版网页", systemImage: "safari")
                             }
                         }
-                        .accessibilityLabel("酒馆菜单")
+
+                        Divider()
+
+                        Button {
+                            Task { await store.loadTavernOverview() }
+                        } label: {
+                            Label("刷新角色列表", systemImage: "arrow.clockwise")
+                        }
+                    } label: {
+                        if store.isReloadingTavern {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "ellipsis.circle")
+                        }
                     }
+                    .accessibilityLabel("酒馆菜单")
                 }
-            }
-            .navigationDestination(for: String.self) { sessionId in
-                ChatView(sessionId: sessionId)
             }
             .navigationDestination(for: TavernRoute.self) { route in
                 TavernChatView(characterId: route.characterId)
-            }
-            .safeAreaInset(edge: .bottom) {
-                if store.homeSection == .agent && !store.agents.isEmpty {
-                    AgentDock(onCreate: quickCreate) {
-                        Haptics.tap(.medium)
-                        showNewSwarm = true
-                    }
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
+                    .toolbar(.hidden, for: .tabBar)
             }
         }
-        .sheet(isPresented: $showSettings) {
-            SettingsView()
-        }
-        .sheet(isPresented: $showNewSession) {
-            NewSessionSheet { created in
-                openSession(created.id)
+    }
+
+    @ToolbarContentBuilder
+    private var settingsToolbarItem: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            Button {
+                showSettings = true
+                Haptics.tap()
+            } label: {
+                Image(systemName: "gearshape")
             }
-        }
-        .sheet(isPresented: $showNewSwarm) {
-            NewSwarmSheet { created in
-                openSession(created.session.id)
-            }
-        }
-        .sheet(isPresented: $showQuota) {
-            QuotaSheet()
-        }
-        .onChange(of: store.pendingOpenSessionId) { _, targetId in
-            guard let targetId else { return }
-            store.pendingOpenSessionId = nil
-            openSession(targetId)
-        }
-        .onChange(of: path.count) { _, newCount in
-            if newCount < sessionTrail.count {
-                sessionTrail = Array(sessionTrail.prefix(newCount))
-            }
-        }
-        .task(id: store.hasBootstrapped) {
-            if store.hasBootstrapped && store.quotas == nil {
-                await store.loadQuotas()
-            }
-        }
-        .alert("重命名会话", isPresented: $showRename) {
-            TextField("会话标题", text: $renameText)
-            Button("取消", role: .cancel) {}
-            Button("保存") {
-                if let target = renameTarget {
-                    let title = renameText
-                    Task { await store.rename(target.id, to: title) }
-                }
-            }
+            .accessibilityLabel("设置")
         }
     }
 
     private var agentList: some View {
         List {
-            topHeader
+            statusHeader
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 10, trailing: 20))
+                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 8, trailing: 20))
 
             if store.topLevelSessions.isEmpty && store.hasBootstrapped {
                 emptyState
@@ -254,8 +285,8 @@ struct SessionListView: View {
                 .listSectionSeparator(.hidden)
             }
 
-            if !search.isEmpty && filtered.isEmpty {
-                Text("没有找到「\(search)」相关的会话")
+            if !agentSearch.isEmpty && filtered.isEmpty {
+                Text("没有找到「\(agentSearch)」相关的会话")
                     .font(.system(size: 14))
                     .foregroundStyle(Palette.textSecondary)
                     .frame(maxWidth: .infinity)
@@ -263,71 +294,13 @@ struct SessionListView: View {
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
             }
-
-            Color.clear
-                .frame(height: 70)
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
+        .scrollEdgeEffectStyle(.soft, for: .all)
         .refreshable {
             await store.refresh()
         }
-    }
-
-    private var topHeader: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            statusHeader
-            sectionSwitcher
-        }
-    }
-
-    private var sectionSwitcher: some View {
-        HStack(spacing: 4) {
-            ForEach(HomeSection.allCases) { section in
-                let selected = store.homeSection == section
-                Button {
-                    guard store.homeSection != section else { return }
-                    Haptics.selection()
-                    withAnimation(.spring(response: 0.34, dampingFraction: 0.84)) {
-                        store.homeSection = section
-                    }
-                    if section == .tavern && store.tavernStatus == nil {
-                        Task { await store.loadTavernOverview() }
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: section == .agent ? "sparkles" : "book.pages.fill")
-                            .font(.system(size: 12.5, weight: .semibold))
-                        Text(section.title)
-                            .font(.system(size: 13.5, weight: .semibold))
-                        if section == .tavern && store.isTavernGenerating {
-                            PulseDot(color: TavernTheme.tint, size: 5)
-                        }
-                    }
-                    .foregroundStyle(selected ? Palette.textPrimary : Palette.textSecondary)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 34)
-                    .background {
-                        if selected {
-                            Capsule(style: .continuous)
-                                .fill(section == .tavern ? TavernTheme.wash : Palette.surface)
-                                .overlay(
-                                    Capsule(style: .continuous)
-                                        .stroke(section == .tavern ? TavernTheme.tint.opacity(0.35) : Palette.hairlineStrong, lineWidth: 0.6)
-                                )
-                                .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
-                                .matchedGeometryEffect(id: "home-section-pill", in: sectionSwitchNamespace)
-                        }
-                    }
-                    .contentShape(Capsule(style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(3)
-        .glassCapsule()
     }
 
     // MARK: Rows
@@ -486,7 +459,7 @@ struct SessionListView: View {
             Text("还没有会话")
                 .font(RelayFont.display(22))
                 .foregroundStyle(Palette.textPrimary)
-            Text("从下方选择一个 Agent，开始你的第一段对话。")
+            Text("点右上角新建按钮，选择一个 Agent 开始对话。")
                 .font(.system(size: 14.5))
                 .foregroundStyle(Palette.textSecondary)
                 .multilineTextAlignment(.center)
@@ -523,12 +496,12 @@ struct SessionListView: View {
 
     /// Safely navigates to `targetId` without pushing duplicates onto the stack.
     private func openSession(_ targetId: String) {
-        if path.count == sessionTrail.count {
+        if agentPath.count == sessionTrail.count {
             if sessionTrail.last == targetId { return }
             if let existingIndex = sessionTrail.firstIndex(of: targetId) {
                 let drop = sessionTrail.count - 1 - existingIndex
                 if drop > 0 {
-                    path.removeLast(drop)
+                    agentPath.removeLast(drop)
                     sessionTrail.removeLast(drop)
                 }
                 return
@@ -539,20 +512,19 @@ struct SessionListView: View {
                let targetSwarm = store.swarm(forSessionId: targetId),
                topSwarm.id == targetSwarm.id,
                topId != topSwarm.coordinatorSessionId {
-                path.removeLast(1)
+                agentPath.removeLast(1)
                 sessionTrail.removeLast(1)
-                path.append(targetId)
+                agentPath.append(targetId)
                 sessionTrail.append(targetId)
                 return
             }
         }
-        path.append(targetId)
+        agentPath.append(targetId)
         sessionTrail.append(targetId)
     }
 
     private func openTavern(characterId: Int) {
-        sessionTrail = []
-        path.append(TavernRoute(characterId: characterId))
+        tavernPath.append(TavernRoute(characterId: characterId))
     }
 }
 
@@ -658,86 +630,5 @@ struct SessionRow: View {
         .padding(.vertical, 6)
         .contentShape(Rectangle())
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isRunning)
-    }
-}
-
-// MARK: - Agent dock (quick new session & swarm)
-
-struct AgentDock: View {
-    @Environment(AppStore.self) private var store
-    var onCreate: (String) -> Void
-    var onCreateSwarm: () -> Void
-
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            GlassGroup(spacing: 10) {
-                HStack(spacing: 10) {
-                    ForEach(store.agents) { agent in
-                        let style = store.style(for: agent.id)
-                        let creating = store.creatingAgentIds.contains(agent.id)
-                        Button {
-                            onCreate(agent.id)
-                        } label: {
-                            HStack(spacing: 9) {
-                                ZStack {
-                                    if creating {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                    } else {
-                                        AgentGlyph(style: style, size: 26)
-                                    }
-                                }
-                                .frame(width: 26, height: 26)
-                                VStack(alignment: .leading, spacing: 0) {
-                                    Text(agent.name)
-                                        .font(.system(size: 14.5, weight: .semibold))
-                                        .foregroundStyle(Palette.textPrimary)
-                                    Text(creating ? "正在启动…" : "新建会话")
-                                        .font(.system(size: 10.5, weight: .medium))
-                                        .foregroundStyle(Palette.textSecondary)
-                                }
-                            }
-                            .padding(.leading, 10)
-                            .padding(.trailing, 16)
-                            .frame(height: 50)
-                            .glassCapsule(interactive: true, tint: style.glow)
-                        }
-                        .buttonStyle(.pressable)
-                        .disabled(creating)
-                    }
-
-                    Button(action: onCreateSwarm) {
-                        HStack(spacing: 9) {
-                            ZStack {
-                                if store.creatingSwarm {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                } else {
-                                    AgentGlyph(style: SwarmTheme.style, size: 26)
-                                }
-                            }
-                            .frame(width: 26, height: 26)
-                            VStack(alignment: .leading, spacing: 0) {
-                                Text("蜂群")
-                                    .font(.system(size: 14.5, weight: .semibold))
-                                    .foregroundStyle(Palette.textPrimary)
-                                Text(store.creatingSwarm ? "正在启动…" : "多 Agent 协作")
-                                    .font(.system(size: 10.5, weight: .medium))
-                                    .foregroundStyle(Palette.textSecondary)
-                            }
-                        }
-                        .padding(.leading, 10)
-                        .padding(.trailing, 16)
-                        .frame(height: 50)
-                        .glassCapsule(interactive: true, tint: SwarmTheme.style.glow)
-                    }
-                    .buttonStyle(.pressable)
-                    .disabled(store.creatingSwarm)
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 8)
-            }
-        }
-        .scrollClipDisabled()
     }
 }

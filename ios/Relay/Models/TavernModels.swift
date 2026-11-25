@@ -68,7 +68,7 @@ enum JSONAnyValue: Codable, Hashable, Sendable {
 
 // MARK: - Navigation route
 
-struct TavernRoute: Hashable {
+struct TavernRoute: Hashable, Sendable {
     let characterId: Int
 }
 

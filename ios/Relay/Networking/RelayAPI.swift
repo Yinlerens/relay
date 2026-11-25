@@ -41,7 +41,7 @@ struct RelayAPI: Sendable {
 
     // MARK: Request plumbing
 
-    private static let decoder = JSONDecoder()
+    private static var decoder: JSONDecoder { JSONDecoder() }
 
     func url(_ path: String) -> URL {
         let trimmed = path.hasPrefix("/") ? String(path.dropFirst()) : path
@@ -59,7 +59,7 @@ struct RelayAPI: Sendable {
         return request
     }
 
-    private func send<T: Decodable>(_ request: URLRequest, as type: T.Type) async throws -> T {
+    private func send<T: Decodable & Sendable>(_ request: URLRequest, as type: T.Type) async throws -> T {
         let data: Data
         let response: URLResponse
         do {
@@ -86,7 +86,7 @@ struct RelayAPI: Sendable {
         }
     }
 
-    private func json<T: Decodable>(
+    private func json<T: Decodable & Sendable>(
         _ path: String,
         method: String = "GET",
         body: [String: Any]? = nil,

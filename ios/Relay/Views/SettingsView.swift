@@ -207,7 +207,6 @@ struct SettingsView: View {
             }
         }
         .presentationDragIndicator(.visible)
-        .relaySheetBackground()
     }
 
     private func saveBark(test: Bool) {

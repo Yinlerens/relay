@@ -1,32 +1,17 @@
 import SwiftUI
 import UIKit
 
-private struct TavernBottomSentinelKey: PreferenceKey {
-    static let defaultValue: CGFloat = .infinity
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = min(value, nextValue())
-    }
-}
-
 // MARK: - Streaming <think> / <thought> splitter
 
 enum TavernTextSplitter {
-    private static let closedTagRegex = try? NSRegularExpression(
-        pattern: "<(think|thought|thinking)>([\\s\\S]*?)</\\1>",
-        options: [.caseInsensitive]
-    )
-    private static let openTagRegex = try? NSRegularExpression(
-        pattern: "<(think|thought|thinking)>([\\s\\S]*)$",
-        options: [.caseInsensitive]
-    )
-    private static let hiddenBlockRegexes: [NSRegularExpression] = [
-        "<UpdateVariable>[\\s\\S]*?</UpdateVariable>",
-        "<UpdateVariable>[\\s\\S]*$",
-        "<StatusPlaceHolderImpl[^>]*>[\\s\\S]*?</StatusPlaceHolderImpl>",
-        "<StatusPlaceHolderImpl\\s*/?>",
-        "<comment>[\\s\\S]*?</comment>",
-        "<comment>[\\s\\S]*$",
-    ].compactMap { try? NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
+    private static let closedTagRegex = #/<(think|thought|thinking)>([\s\S]*?)</\1>/#.ignoresCase()
+    private static let openTagRegex = #/<(?:think|thought|thinking)>([\s\S]*)$/#.ignoresCase()
+    private static let updateVarClosedRegex = #/<UpdateVariable>[\s\S]*?</UpdateVariable>/#.ignoresCase()
+    private static let updateVarOpenRegex = #/<UpdateVariable>[\s\S]*$/#.ignoresCase()
+    private static let statusPlaceholderRegex = #/<StatusPlaceHolderImpl[^>]*>[\s\S]*?</StatusPlaceHolderImpl>/#.ignoresCase()
+    private static let statusPlaceholderSelfClosingRegex = #/<StatusPlaceHolderImpl\s*/?>/#.ignoresCase()
+    private static let commentClosedRegex = #/<comment>[\s\S]*?</comment>/#.ignoresCase()
+    private static let commentOpenRegex = #/<comment>[\s\S]*$/#.ignoresCase()
 
     static func split(rawText: String, explicitReasoning: String, isStreaming: Bool) -> (reasoning: String, visible: String) {
         var reasoningParts: [String] = []
@@ -36,49 +21,31 @@ enum TavernTextSplitter {
         }
 
         var working = rawText
-        if let regex = closedTagRegex {
-            let ns = working as NSString
-            let matches = regex.matches(in: working, options: [], range: NSRange(location: 0, length: ns.length))
-            if !matches.isEmpty {
-                for match in matches {
-                    if match.numberOfRanges > 2 {
-                        let inner = ns.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !inner.isEmpty && !reasoningParts.contains(inner) {
-                            reasoningParts.append(inner)
-                        }
-                    }
+        let closedMatches = working.matches(of: closedTagRegex)
+        if !closedMatches.isEmpty {
+            for match in closedMatches {
+                let inner = match.output.2.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !inner.isEmpty && !reasoningParts.contains(inner) {
+                    reasoningParts.append(inner)
                 }
-                working = regex.stringByReplacingMatches(
-                    in: working,
-                    options: [],
-                    range: NSRange(location: 0, length: ns.length),
-                    withTemplate: ""
-                )
             }
+            working.replace(closedTagRegex, with: "")
         }
 
-        if isStreaming, let openRegex = openTagRegex {
-            let ns = working as NSString
-            if let match = openRegex.firstMatch(in: working, options: [], range: NSRange(location: 0, length: ns.length)) {
-                if match.numberOfRanges > 2 {
-                    let inner = ns.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !inner.isEmpty && !reasoningParts.contains(inner) {
-                        reasoningParts.append(inner)
-                    }
-                }
-                working = ns.substring(to: match.range.location)
+        if isStreaming, let match = working.firstMatch(of: openTagRegex) {
+            let inner = match.output.1.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !inner.isEmpty && !reasoningParts.contains(inner) {
+                reasoningParts.append(inner)
             }
+            working = String(working[..<match.range.lowerBound])
         }
 
-        for regex in hiddenBlockRegexes {
-            let ns = working as NSString
-            working = regex.stringByReplacingMatches(
-                in: working,
-                options: [],
-                range: NSRange(location: 0, length: ns.length),
-                withTemplate: ""
-            )
-        }
+        working.replace(updateVarClosedRegex, with: "")
+        working.replace(updateVarOpenRegex, with: "")
+        working.replace(statusPlaceholderRegex, with: "")
+        working.replace(statusPlaceholderSelfClosingRegex, with: "")
+        working.replace(commentClosedRegex, with: "")
+        working.replace(commentOpenRegex, with: "")
 
         return (
             reasoning: reasoningParts.joined(separator: "\n\n"),
@@ -96,12 +63,12 @@ struct TavernChatView: View {
     @State private var draft = ""
     @State private var isSending = false
     @State private var isAtBottom = true
-    @State private var viewportHeight: CGFloat = 0
     @State private var showHistory = false
     @State private var editingMessage: TavernMessage? = nil
     @State private var deletingMessage: TavernMessage? = nil
     @State private var viewerImage: TavernImageItem? = nil
     @FocusState private var composerFocused: Bool
+    @Namespace private var tavernImageNamespace
 
     private let bottomID = "tavern-bottom"
 
@@ -168,6 +135,7 @@ struct TavernChatView: View {
                             message: message,
                             isLastAssistant: message.mesId == lastAssistantMesId,
                             variablesJSON: store.tavernVariablesJSON,
+                            imageNamespace: tavernImageNamespace,
                             onOpenImage: { item in viewerImage = item },
                             onEdit: { editingMessage = message },
                             onDelete: { deletingMessage = message },
@@ -198,14 +166,6 @@ struct TavernChatView: View {
                     Color.clear
                         .frame(height: 1)
                         .id(bottomID)
-                        .background(
-                            GeometryReader { geo in
-                                Color.clear.preference(
-                                    key: TavernBottomSentinelKey.self,
-                                    value: geo.frame(in: .named("tavern-scroll")).minY
-                                )
-                            }
-                        )
                 }
                 .padding(.horizontal, 18)
                 .padding(.top, 14)
@@ -213,18 +173,13 @@ struct TavernChatView: View {
                 .frame(maxWidth: 780)
                 .frame(maxWidth: .infinity)
             }
-            .coordinateSpace(name: "tavern-scroll")
             .defaultScrollAnchor(.bottom)
+            .scrollEdgeEffectStyle(.soft, for: .all)
             .scrollDismissesKeyboard(.interactively)
-            .background(
-                GeometryReader { geo in
-                    Color.clear
-                        .onAppear { viewportHeight = geo.size.height }
-                        .onChange(of: geo.size.height) { _, h in viewportHeight = h }
-                }
-            )
-            .onPreferenceChange(TavernBottomSentinelKey.self) { minY in
-                let atBottom = minY <= viewportHeight + 90
+            .onScrollGeometryChange(for: Bool.self) { geo in
+                let distance = geo.contentSize.height - (geo.contentOffset.y + geo.containerSize.height - geo.contentInsets.bottom)
+                return distance <= 90
+            } action: { _, atBottom in
                 if atBottom != isAtBottom {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                         isAtBottom = atBottom
@@ -354,6 +309,7 @@ struct TavernChatView: View {
         }
         .fullScreenCover(item: $viewerImage) { item in
             TavernImageViewer(item: item)
+                .navigationTransition(.zoom(sourceID: item.sourceId, in: tavernImageNamespace))
         }
         .confirmationDialog(
             "删除第 #\(deletingMessage?.mesId ?? 0) 楼？",
@@ -409,11 +365,12 @@ struct TavernChatView: View {
                         .font(.system(size: 12.5, weight: .semibold))
                 }
                 .foregroundStyle(TavernTheme.tint)
-                .padding(.horizontal, 14)
-                .frame(height: 34)
-                .glassCapsule(interactive: true, tint: TavernTheme.glow)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
             }
-            .buttonStyle(.pressable)
+            .buttonStyle(.glass)
+            .buttonBorderShape(.capsule)
+            .tint(TavernTheme.tint)
             .disabled(store.isLoadingOlderTavernMessages)
             Spacer()
         }
@@ -531,6 +488,7 @@ struct TavernMessageRow: View {
     let message: TavernMessage
     let isLastAssistant: Bool
     let variablesJSON: String
+    let imageNamespace: Namespace.ID
     var onOpenImage: (TavernImageItem) -> Void
     var onEdit: () -> Void
     var onDelete: () -> Void
@@ -712,9 +670,10 @@ struct TavernMessageRow: View {
 
         case "image":
             if let url = block.imageUrl, !url.isEmpty {
+                let sourceId = "tavern-img-\(message.mesId)-\(block.id)"
                 Button {
                     Haptics.tap(.soft)
-                    onOpenImage(TavernImageItem(url: url, alt: block.imageAlt ?? ""))
+                    onOpenImage(TavernImageItem(url: url, alt: block.imageAlt ?? "", sourceId: sourceId))
                 } label: {
                     TavernAssetImageView(
                         pathOrUrl: url,
@@ -730,6 +689,7 @@ struct TavernMessageRow: View {
                     )
                 }
                 .buttonStyle(.pressable)
+                .matchedTransitionSource(id: sourceId, in: imageNamespace)
             }
 
         case "html", "iframe":
@@ -810,7 +770,7 @@ struct TavernMessageRow: View {
                 Haptics.success()
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { copied = true }
                 Task {
-                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    try? await Task.sleep(for: .milliseconds(1500))
                     withAnimation(.easeOut(duration: 0.2)) { copied = false }
                 }
             } label: {
@@ -944,8 +904,8 @@ struct TavernChatHistorySheet: View {
                                 .cardSurface(radius: 20)
                         } else {
                             VStack(spacing: 0) {
-                                ForEach(Array(chats.enumerated()), id: \.element.id) { index, chat in
-                                    if index > 0 {
+                                ForEach(chats) { chat in
+                                    if chat.id != chats.first?.id {
                                         Divider().overlay(Palette.hairline).padding(.leading, 16)
                                     }
                                     let isSelected = chat.isCurrent || chat.fileName == currentChatFile
@@ -1012,7 +972,6 @@ struct TavernChatHistorySheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .relaySheetBackground()
         .task(id: characterId) {
             loading = true
             await store.loadTavernChats(characterId: characterId)
@@ -1084,7 +1043,6 @@ struct TavernEditMessageSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .relaySheetBackground()
         .onAppear {
             draft = message.rawText
         }

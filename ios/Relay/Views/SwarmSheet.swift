@@ -121,7 +121,6 @@ struct SwarmSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .relaySheetBackground()
         .task(id: swarmId) {
             await store.loadSwarm(swarmId)
             if workerAgentId.isEmpty, let sw = store.swarm(id: swarmId) {
@@ -767,7 +766,7 @@ struct SwarmSheet: View {
         dismiss()
         guard targetSessionId != currentSessionId else { return }
         Task {
-            try? await Task.sleep(nanoseconds: 180_000_000)
+            try? await Task.sleep(for: .milliseconds(180))
             store.requestOpenSession(targetSessionId)
         }
     }
@@ -870,17 +869,13 @@ struct SwarmBoardCard: View {
 // MARK: - @mention AttributedString highlighter
 
 enum MentionHighlighter {
-    private static let regex = try? NSRegularExpression(pattern: "@[A-Za-z0-9_-]+")
+    private static let regex = #/@[A-Za-z0-9_-]+/#
 
     static func attributed(_ text: String, tint: Color) -> AttributedString {
         var result = AttributedString(text)
-        guard let regex else { return result }
-        let ns = text as NSString
-        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: ns.length))
-        for match in matches {
-            guard let swiftRange = Range(match.range, in: text),
-                  let lower = AttributedString.Index(swiftRange.lowerBound, within: result),
-                  let upper = AttributedString.Index(swiftRange.upperBound, within: result) else {
+        for match in text.matches(of: regex) {
+            guard let lower = AttributedString.Index(match.range.lowerBound, within: result),
+                  let upper = AttributedString.Index(match.range.upperBound, within: result) else {
                 continue
             }
             let range = lower..<upper

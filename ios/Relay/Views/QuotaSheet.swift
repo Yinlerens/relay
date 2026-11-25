@@ -40,6 +40,7 @@ struct QuotaSheet: View {
                 .frame(maxWidth: 680)
                 .frame(maxWidth: .infinity)
             }
+            .scrollEdgeEffectStyle(.soft, for: .all)
             .refreshable {
                 await store.loadQuotas(refresh: true)
             }
@@ -68,7 +69,6 @@ struct QuotaSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .relaySheetBackground()
         .task {
             await store.loadQuotas(refresh: false)
         }
@@ -131,23 +131,11 @@ struct QuotaSheet: View {
                 if !quota.available {
                     QuotaNotice(message: quota.error ?? "暂时无法读取 Antigravity 限额")
                 }
-                if !quota.description.isEmpty {
-                    Text(quota.description)
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(Palette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
 
-                ForEach(Array(quota.groups.enumerated()), id: \.offset) { _, group in
+                ForEach(quota.groups) { group in
                     VStack(alignment: .leading, spacing: 14) {
                         Eyebrow(text: group.name)
-                        if !group.description.isEmpty {
-                            Text(group.description)
-                                .font(.system(size: 12))
-                                .foregroundStyle(Palette.textTertiary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        ForEach(Array(group.buckets.enumerated()), id: \.offset) { _, bucket in
+                        ForEach(group.buckets) { bucket in
                             QuotaBucketRow(bucket: bucket)
                         }
                     }
@@ -162,30 +150,6 @@ struct QuotaSheet: View {
                     Text("Antigravity 暂未上报模型限额。")
                         .font(.system(size: 13))
                         .foregroundStyle(Palette.textSecondary)
-                }
-
-                HStack(spacing: 12) {
-                    ZStack {
-                        Circle().fill(agStyle.tint.opacity(0.14))
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(agStyle.tint)
-                    }
-                    .frame(width: 34, height: 34)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("AI Credits 余额")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(Palette.textPrimary)
-                        Text("超出模型限额后可按量抵扣")
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(Palette.textTertiary)
-                    }
-                    Spacer(minLength: 8)
-                    Text(RelayFormat.credits(quota.remainingCredits))
-                        .font(RelayFont.rounded(22, weight: .semibold))
-                        .monospacedDigit()
-                        .foregroundStyle(Palette.textPrimary)
-                        .contentTransition(.numericText(value: quota.remainingCredits))
                 }
 
                 if let url = quota.upgradeURL {
@@ -225,8 +189,8 @@ struct QuotaSheet: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Eyebrow(text: "按模型消耗")
                         VStack(spacing: 0) {
-                            ForEach(Array(usage.byModel.enumerated()), id: \.offset) { index, model in
-                                if index > 0 {
+                            ForEach(usage.byModel) { model in
+                                if model.id != usage.byModel.first?.id {
                                     Divider().overlay(Palette.hairline)
                                 }
                                 ModelCreditRow(model: model, maxCredits: maxCredits, tint: cbStyle.tint)
@@ -246,7 +210,7 @@ struct QuotaSheet: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Eyebrow(text: "限频状态")
                         VStack(spacing: 14) {
-                            ForEach(Array(usage.rateQuotas.enumerated()), id: \.offset) { _, quota in
+                            ForEach(usage.rateQuotas) { quota in
                                 RateQuotaRow(quota: quota)
                             }
                         }
@@ -257,18 +221,6 @@ struct QuotaSheet: View {
                         )
                     }
                 }
-
-                if let note = usage.note, !note.isEmpty {
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: "info.circle")
-                        Text(note)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .font(.system(size: 12))
-                    .foregroundStyle(Palette.textTertiary)
-                }
-
-                QuotaLinkButton(title: "前往控制台查看剩余总积分", systemImage: "safari", tint: cbStyle.tint, url: usage.consoleURL)
             } else {
                 QuotaNotice(message: "服务端未返回 CodeBuddy 积分数据")
             }
@@ -306,11 +258,11 @@ struct QuotaSheet: View {
             } label: {
                 Text("重试")
                     .font(.system(size: 15, weight: .semibold))
-                    .padding(.horizontal, 26)
-                    .frame(height: 42)
-                    .glassCapsule(interactive: true)
+                    .padding(.horizontal, 22)
+                    .padding(.vertical, 8)
             }
-            .buttonStyle(.pressable)
+            .buttonStyle(.glass)
+            .buttonBorderShape(.capsule)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 50)
@@ -507,9 +459,6 @@ struct QuotaBucketRow: View {
                     TimelineView(.periodic(from: .now, by: 30)) { context in
                         Label(QuotaDates.resetCountdown(to: reset, now: context.date), systemImage: "clock.arrow.circlepath")
                     }
-                } else if !bucket.description.isEmpty {
-                    Text(bucket.description)
-                        .lineLimit(2)
                 }
                 Spacer(minLength: 0)
                 if fraction != nil {

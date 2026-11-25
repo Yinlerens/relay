@@ -4,7 +4,7 @@ import WebKit
 
 // MARK: - Authenticated Tavern image & raw asset L1+L2 cache
 
-final class CachedRawAsset: NSObject {
+final class CachedRawAsset: NSObject, @unchecked Sendable {
     let data: Data
     let mimeType: String?
 
@@ -182,10 +182,17 @@ struct TavernAssetImageView: View {
 
 // MARK: - Full-screen Tavern image viewer
 
-struct TavernImageItem: Identifiable, Hashable {
+struct TavernImageItem: Identifiable, Hashable, Sendable {
     let id = UUID()
     let url: String
     let alt: String
+    let sourceId: String
+
+    init(url: String, alt: String, sourceId: String? = nil) {
+        self.url = url
+        self.alt = alt
+        self.sourceId = sourceId ?? url
+    }
 }
 
 struct TavernImageViewer: View {
@@ -198,17 +205,11 @@ struct TavernImageViewer: View {
     @State private var baseScale: CGFloat = 1
     @State private var offset: CGSize = .zero
     @State private var baseOffset: CGSize = .zero
-    @State private var dismissDrag: CGFloat = 0
     @State private var chromeVisible = true
-
-    private var backdropOpacity: Double {
-        1 - min(Double(abs(dismissDrag)) / 500, 0.7)
-    }
 
     var body: some View {
         ZStack {
             Color.black
-                .opacity(backdropOpacity)
                 .ignoresSafeArea()
 
             if let image {
@@ -216,8 +217,9 @@ struct TavernImageViewer: View {
                     .resizable()
                     .scaledToFit()
                     .scaleEffect(scale)
-                    .offset(x: offset.width, y: offset.height + dismissDrag)
-                    .gesture(magnify.simultaneously(with: drag))
+                    .offset(offset)
+                    .gesture(magnify)
+                    .gesture(panDrag, isEnabled: scale > 1.01)
                     .onTapGesture(count: 2) {
                         Haptics.tap(.soft)
                         withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
@@ -248,10 +250,10 @@ struct TavernImageViewer: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.white)
-                        .frame(width: 42, height: 42)
-                        .glassCircle()
+                        .frame(width: 34, height: 34)
                 }
-                .buttonStyle(.pressable)
+                .buttonStyle(.glass)
+                .buttonBorderShape(.circle)
                 .padding(.trailing, 18)
                 .padding(.top, 8)
                 .transition(.opacity)
@@ -310,27 +312,16 @@ struct TavernImageViewer: View {
             }
     }
 
-    private var drag: some Gesture {
+    private var panDrag: some Gesture {
         DragGesture()
             .onChanged { value in
-                if scale > 1.01 {
-                    offset = CGSize(
-                        width: baseOffset.width + value.translation.width,
-                        height: baseOffset.height + value.translation.height
-                    )
-                } else {
-                    dismissDrag = value.translation.height
-                }
+                offset = CGSize(
+                    width: baseOffset.width + value.translation.width,
+                    height: baseOffset.height + value.translation.height
+                )
             }
-            .onEnded { value in
-                if scale > 1.01 {
-                    baseOffset = offset
-                } else if abs(value.translation.height) > 140 || abs(value.predictedEndTranslation.height) > 420 {
-                    Haptics.tap(.soft)
-                    dismiss()
-                } else {
-                    withAnimation(.spring(response: 0.36, dampingFraction: 0.8)) { dismissDrag = 0 }
-                }
+            .onEnded { _ in
+                baseOffset = offset
             }
     }
 
@@ -345,6 +336,7 @@ struct TavernImageViewer: View {
 // MARK: - WKURLSchemeHandler for `relay-st://asset?path=...`
 
 /// Proxies SillyTavern assets inside `WKWebView` using Bearer auth without ever embedding tokens in HTML.
+@MainActor
 final class TavernAssetSchemeHandler: NSObject, WKURLSchemeHandler {
     private let api: RelayAPI
     private var activeTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
@@ -359,42 +351,38 @@ final class TavernAssetSchemeHandler: NSObject, WKURLSchemeHandler {
         let rawURL = requestURL.absoluteString
         let api = self.api
 
-        let task = Task { [weak self] in
+        let task = Task { @MainActor [weak self] in
             do {
                 let (data, serverMime) = try await TavernAssetCache.shared.rawAsset(for: rawURL, api: api)
-                await MainActor.run {
-                    guard let self, self.activeTasks.removeValue(forKey: key) != nil, !Task.isCancelled else {
-                        return
-                    }
-                    let resolved = Self.resolvedMime(serverMime: serverMime, rawURL: rawURL)
-                    let headers: [String: String] = [
-                        "Content-Type": resolved.headerValue,
-                        "Content-Length": "\(data.count)",
-                        "Cache-Control": "private, max-age=3600",
-                        "Access-Control-Allow-Origin": "*",
-                    ]
-                    let response: URLResponse = HTTPURLResponse(
-                        url: requestURL,
-                        statusCode: 200,
-                        httpVersion: "HTTP/1.1",
-                        headerFields: headers
-                    ) ?? URLResponse(
-                        url: requestURL,
-                        mimeType: resolved.mimeType,
-                        expectedContentLength: data.count,
-                        textEncodingName: resolved.isUTF8 ? "utf-8" : nil
-                    )
-                    urlSchemeTask.didReceive(response)
-                    urlSchemeTask.didReceive(data)
-                    urlSchemeTask.didFinish()
+                guard let self, self.activeTasks.removeValue(forKey: key) != nil, !Task.isCancelled else {
+                    return
                 }
+                let resolved = Self.resolvedMime(serverMime: serverMime, rawURL: rawURL)
+                let headers: [String: String] = [
+                    "Content-Type": resolved.headerValue,
+                    "Content-Length": "\(data.count)",
+                    "Cache-Control": "private, max-age=3600",
+                    "Access-Control-Allow-Origin": "*",
+                ]
+                let response: URLResponse = HTTPURLResponse(
+                    url: requestURL,
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: headers
+                ) ?? URLResponse(
+                    url: requestURL,
+                    mimeType: resolved.mimeType,
+                    expectedContentLength: data.count,
+                    textEncodingName: resolved.isUTF8 ? "utf-8" : nil
+                )
+                urlSchemeTask.didReceive(response)
+                urlSchemeTask.didReceive(data)
+                urlSchemeTask.didFinish()
             } catch {
-                await MainActor.run {
-                    guard let self, self.activeTasks.removeValue(forKey: key) != nil, !Task.isCancelled else {
-                        return
-                    }
-                    urlSchemeTask.didFailWithError(error)
+                guard let self, self.activeTasks.removeValue(forKey: key) != nil, !Task.isCancelled else {
+                    return
                 }
+                urlSchemeTask.didFailWithError(error)
             }
         }
         activeTasks[key] = task

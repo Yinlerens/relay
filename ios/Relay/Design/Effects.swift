@@ -2,32 +2,36 @@ import SwiftUI
 
 // MARK: - Shimmer
 
-/// Soft specular sweep used on "thinking" labels while streaming.
+/// Soft 120Hz GPU-accelerated specular sweep used on "thinking" labels while streaming.
 struct Shimmer: ViewModifier {
     var active: Bool
-    var duration: Double = 1.8
+    var duration: Double = 1.6
+    @State private var sweeping = false
 
     func body(content: Content) -> some View {
         if active {
             content
                 .overlay {
-                    TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-                        let t = context.date.timeIntervalSinceReferenceDate
-                        let phase = CGFloat(t.truncatingRemainder(dividingBy: duration) / duration)
-                        GeometryReader { geo in
-                            let width = max(geo.size.width, 1)
-                            LinearGradient(
-                                colors: [.clear, Color.white.opacity(0.75), .clear],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                            .frame(width: width * 0.55)
-                            .offset(x: -width * 0.55 + phase * width * 1.55)
-                        }
+                    LinearGradient(
+                        colors: [.clear, Color.white.opacity(0.75), .clear],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .visualEffect { view, proxy in
+                        view.offset(x: sweeping ? proxy.size.width : -proxy.size.width)
                     }
-                    .mask { content }
-                    .blendMode(.plusLighter)
                     .allowsHitTesting(false)
+                }
+                .mask { content }
+                .blendMode(.plusLighter)
+                .onAppear {
+                    sweeping = false
+                    withAnimation(.linear(duration: duration).repeatForever(autoreverses: false)) {
+                        sweeping = true
+                    }
+                }
+                .onDisappear {
+                    sweeping = false
                 }
         } else {
             content
@@ -43,27 +47,33 @@ extension View {
 
 // MARK: - Pulse dot
 
-/// Live "breathing" dot for background streaming sessions.
+/// Live 120Hz breathing dot for background streaming sessions.
 struct PulseDot: View {
     var color: Color
     var size: CGFloat = 8
+    @State private var pulsing = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            let phase = CGFloat(t.truncatingRemainder(dividingBy: 1.6) / 1.6)
-            ZStack {
-                Circle()
-                    .fill(color.opacity(0.35 * (1 - phase)))
-                    .frame(width: size, height: size)
-                    .scaleEffect(1 + phase * 1.6)
-                Circle()
-                    .fill(color)
-                    .frame(width: size, height: size)
-                    .shadow(color: color.opacity(0.7), radius: 4)
-            }
+        ZStack {
+            Circle()
+                .fill(color.opacity(pulsing ? 0.0 : 0.42))
+                .frame(width: size, height: size)
+                .scaleEffect(pulsing ? 2.5 : 1.0)
+            Circle()
+                .fill(color)
+                .frame(width: size, height: size)
+                .shadow(color: color.opacity(0.7), radius: 4)
         }
         .frame(width: size * 2.8, height: size * 2.8)
+        .onAppear {
+            pulsing = false
+            withAnimation(.easeOut(duration: 1.5).repeatForever(autoreverses: false)) {
+                pulsing = true
+            }
+        }
+        .onDisappear {
+            pulsing = false
+        }
         .accessibilityLabel("正在运行")
     }
 }
@@ -72,20 +82,25 @@ struct PulseDot: View {
 
 struct TypingDots: View {
     var color: Color
+    @State private var animating = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            HStack(spacing: 5) {
-                ForEach(0..<3, id: \.self) { i in
-                    let p = (sin((t * 5.2) - Double(i) * 0.75) + 1) / 2
-                    Circle()
-                        .fill(color.opacity(0.35 + 0.65 * p))
-                        .frame(width: 6, height: 6)
-                        .scaleEffect(0.8 + 0.3 * p)
-                }
+        HStack(spacing: 5) {
+            ForEach(0..<3, id: \.self) { i in
+                Circle()
+                    .fill(color.opacity(animating ? 0.95 : 0.32))
+                    .frame(width: 6, height: 6)
+                    .scaleEffect(animating ? 1.12 : 0.78)
+                    .animation(
+                        .easeInOut(duration: 0.52)
+                            .repeatForever(autoreverses: true)
+                            .delay(Double(i) * 0.16),
+                        value: animating
+                    )
             }
         }
+        .onAppear { animating = true }
+        .onDisappear { animating = false }
         .accessibilityLabel("正在生成")
     }
 }
@@ -115,38 +130,53 @@ struct AgentGlyph: View {
                 .font(.system(size: size * 0.42, weight: .semibold))
                 .foregroundStyle(.white)
                 .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
-                .symbolEffect(.pulse, options: .repeating, isActive: isRunning)
+                .symbolEffect(.breathe, options: .repeating, isActive: isRunning)
         }
         .frame(width: size, height: size)
         .shadow(color: style.glow.opacity(0.35), radius: size * 0.25, y: size * 0.1)
     }
 }
 
-// MARK: - Ambient background
+// MARK: - Ambient background (GPU MeshGradient)
 
-/// Obsidian / porcelain canvas with a subtle per-agent signature glow.
+/// Obsidian / porcelain canvas with a GPU-accelerated `MeshGradient` ambient glow.
 struct AmbientBackground: View {
     var tint: Color?
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        ZStack {
-            Palette.canvas
-            if let tint {
-                RadialGradient(
-                    colors: [tint.opacity(scheme == .dark ? 0.22 : 0.12), .clear],
-                    center: .init(x: 0.15, y: -0.05),
-                    startRadius: 10,
-                    endRadius: 520
-                )
-                RadialGradient(
-                    colors: [tint.opacity(scheme == .dark ? 0.10 : 0.06), .clear],
-                    center: .init(x: 1.0, y: 0.25),
-                    startRadius: 10,
-                    endRadius: 380
-                )
-            }
+        let base = scheme == .dark ? Color(hex: 0x0A0A0E) : Color(hex: 0xF5F3EF)
+        let primaryGlow: Color
+        let secondaryGlow: Color
+        let softGlow: Color
+
+        if let tint {
+            primaryGlow = tint.opacity(scheme == .dark ? 0.26 : 0.15)
+            secondaryGlow = tint.opacity(scheme == .dark ? 0.13 : 0.08)
+            softGlow = tint.opacity(scheme == .dark ? 0.08 : 0.05)
+        } else {
+            let subtle = scheme == .dark ? Color(hex: 0x6E73F0).opacity(0.08) : Color(hex: 0x6E73F0).opacity(0.045)
+            primaryGlow = subtle
+            secondaryGlow = subtle.opacity(0.6)
+            softGlow = base
         }
+
+        return MeshGradient(
+            width: 3,
+            height: 3,
+            points: [
+                [0.0, 0.0], [0.5, 0.0], [1.0, 0.0],
+                [0.0, 0.42], [0.45, 0.38], [1.0, 0.32],
+                [0.0, 1.0], [0.5, 1.0], [1.0, 1.0],
+            ],
+            colors: [
+                primaryGlow, softGlow, base,
+                base, base, secondaryGlow,
+                base, base, base,
+            ],
+            smoothsColors: true
+        )
+        .background(base)
         .ignoresSafeArea()
     }
 }

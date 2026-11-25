@@ -115,7 +115,7 @@ final class RelaySocket {
     private func startHeartbeat(generation gen: Int) {
         heartbeat = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                try? await Task.sleep(for: .seconds(20))
                 guard let self, self.generation == gen, !Task.isCancelled else { return }
                 self.sendPing()
             }
@@ -125,9 +125,10 @@ final class RelaySocket {
     private func sendPing() {
         guard let socket = task else { return }
         let gen = generation
-        socket.send(.string("{\"type\":\"ping\"}")) { [weak self] error in
-            guard error != nil else { return }
-            Task { @MainActor [weak self] in
+        Task { [weak self] in
+            do {
+                try await socket.send(.string("{\"type\":\"ping\"}"))
+            } catch {
                 guard let self, self.generation == gen else { return }
                 self.handleFailure()
             }
@@ -153,7 +154,7 @@ final class RelaySocket {
         let base = min(30.0, pow(2.0, Double(min(attempts, 6))) * 0.5)
         let delay = base + Double.random(in: 0...0.6)
         reconnectTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            try? await Task.sleep(for: .seconds(delay))
             guard let self, !Task.isCancelled, self.shouldRun else { return }
             self.open()
         }

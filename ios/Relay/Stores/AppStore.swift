@@ -2,19 +2,19 @@ import SwiftUI
 import UIKit
 import Observation
 
-struct Banner: Identifiable, Equatable {
+struct Banner: Identifiable, Equatable, Sendable {
     let id = UUID()
     var message: String
     var isError: Bool = true
 }
 
-struct PairingRequest: Identifiable, Equatable {
+struct PairingRequest: Identifiable, Equatable, Sendable {
     let id = UUID()
     var serverURL: String
     var token: String
 }
 
-enum HomeSection: String, CaseIterable, Identifiable {
+enum HomeSection: String, CaseIterable, Identifiable, Sendable {
     case agent
     case tavern
     var id: String { rawValue }
@@ -403,7 +403,7 @@ final class AppStore {
             banner = Banner(message: message, isError: isError)
         }
         bannerTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 3_200_000_000)
+            try? await Task.sleep(for: .milliseconds(3200))
             guard !Task.isCancelled else { return }
             withAnimation(.easeInOut(duration: 0.3)) {
                 self?.banner = nil
@@ -1732,7 +1732,7 @@ final class AppStore {
         guard !flushScheduled else { return }
         flushScheduled = true
         Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 40_000_000)
+            try? await Task.sleep(for: .milliseconds(40))
             self?.flushDeltas()
         }
     }

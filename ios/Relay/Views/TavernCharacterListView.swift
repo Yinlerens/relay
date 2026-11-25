@@ -75,12 +75,13 @@ struct TavernCharacterListView<Header: View>: View {
             }
 
             Color.clear
-                .frame(height: 36)
+                .frame(height: 12)
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
+        .scrollEdgeEffectStyle(.soft, for: .all)
         .scrollDismissesKeyboard(.interactively)
         .refreshable {
             await store.loadTavernOverview()

@@ -278,7 +278,8 @@ struct MarkdownView: View {
 
         case .list(let items):
             VStack(alignment: .leading, spacing: 7) {
-                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                ForEach(items.indices, id: \.self) { index in
+                    let item = items[index]
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         marker(item.marker)
                         Text(MarkdownParser.inline(item.text, tint: style.tint))
@@ -361,7 +362,8 @@ struct TableBlock: View {
         let columns = rows.map(\.count).max() ?? 0
         ScrollView(.horizontal, showsIndicators: false) {
             Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
-                ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                ForEach(rows.indices, id: \.self) { index in
+                    let row = rows[index]
                     GridRow {
                         ForEach(0..<columns, id: \.self) { col in
                             Text(MarkdownParser.inline(col < row.count ? row[col] : "", tint: tint))
@@ -449,49 +451,22 @@ struct CodeBlockCard: View {
         Haptics.success()
         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { copied = true }
         Task {
-            try? await Task.sleep(nanoseconds: 1_600_000_000)
+            try? await Task.sleep(for: .milliseconds(1600))
             withAnimation(.easeOut(duration: 0.2)) { copied = false }
         }
     }
 }
 
-// MARK: - Syntax highlighting (linear, regex-based, dependency-free)
+// MARK: - Syntax highlighting (linear, Swift Regex-based, dependency-free)
 
 enum SyntaxHighlighter {
-    private enum Token: UInt8 {
-        case plain = 0
-        case keyword
-        case string
-        case number
-        case comment
-        case type
-    }
-
-    private static let keywordList = [
-        "func", "let", "var", "const", "if", "else", "for", "while", "return", "import", "from", "class",
-        "struct", "enum", "def", "fn", "pub", "async", "await", "try", "catch", "throw", "throws", "new",
-        "true", "false", "nil", "null", "None", "True", "False", "self", "this", "export", "default",
-        "interface", "type", "public", "private", "protected", "static", "extends", "implements", "in",
-        "of", "guard", "switch", "case", "break", "continue", "do", "package", "use", "mut", "impl",
-        "match", "lambda", "yield", "with", "as", "is", "not", "and", "or", "elif", "except", "finally",
-        "raise", "pass", "function", "echo", "then", "fi", "done", "esac", "select", "where", "go",
-        "defer", "chan", "map", "struct", "protocol", "extension", "init", "override", "final", "some", "any",
-    ]
-
-    private static let keywordRegex = try? NSRegularExpression(
-        pattern: "\\b(" + keywordList.joined(separator: "|") + ")\\b"
-    )
-    private static let numberRegex = try? NSRegularExpression(pattern: "\\b(0x[0-9a-fA-F]+|\\d+(\\.\\d+)?)\\b")
-    private static let typeRegex = try? NSRegularExpression(pattern: "\\b[A-Z][A-Za-z0-9_]+\\b")
-    private static let stringRegex = try? NSRegularExpression(
-        pattern: "\"(?:[^\"\\\\\\n]|\\\\.)*\"|'(?:[^'\\\\\\n]|\\\\.)*'|`(?:[^`\\\\]|\\\\.)*`"
-    )
-    private static let slashCommentRegex = try? NSRegularExpression(
-        pattern: "//[^\\n]*|/\\*[\\s\\S]*?\\*/",
-        options: []
-    )
-    private static let hashCommentRegex = try? NSRegularExpression(pattern: "#[^\\n]*")
-    private static let dashCommentRegex = try? NSRegularExpression(pattern: "--[^\\n]*")
+    private static let keywordRegex = #/\b(?:func|let|var|const|if|else|for|while|return|import|from|class|struct|enum|def|fn|pub|async|await|try|catch|throw|throws|new|true|false|nil|null|None|True|False|self|this|export|default|interface|type|public|private|protected|static|extends|implements|in|of|guard|switch|case|break|continue|do|package|use|mut|impl|match|lambda|yield|with|as|is|not|and|or|elif|except|finally|raise|pass|function|echo|then|fi|done|esac|select|where|go|defer|chan|map|protocol|extension|init|override|final|some|any)\b/#
+    private static let numberRegex = #/\b(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?)\b/#
+    private static let typeRegex = #/\b[A-Z][A-Za-z0-9_]+\b/#
+    private static let stringRegex = #/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`/#
+    private static let slashCommentRegex = #/(?://[^\n]*|/\*[\s\S]*?\*/)/#
+    private static let hashCommentRegex = #/#[^\n]*/#
+    private static let dashCommentRegex = #/--[^\n]*/#
 
     private static let hashLanguages: Set<String> = [
         "python", "py", "bash", "sh", "zsh", "shell", "console", "yaml", "yml", "ruby", "rb", "toml",
@@ -500,62 +475,35 @@ enum SyntaxHighlighter {
     private static let dashLanguages: Set<String> = ["sql", "lua", "haskell", "hs"]
 
     static func highlight(_ code: String, language: String) -> AttributedString {
-        let ns = code as NSString
-        let length = ns.length
-        guard length > 0, length <= 16_000 else {
-            var plain = AttributedString(code)
-            plain.foregroundColor = Palette.codeText
-            return plain
+        var result = AttributedString(code)
+        result.foregroundColor = Palette.codeText
+        guard !code.isEmpty, code.count <= 16_000 else {
+            return result
         }
 
-        var tokens = [UInt8](repeating: Token.plain.rawValue, count: length)
-        let full = NSRange(location: 0, length: length)
-
-        func mark(_ regex: NSRegularExpression?, _ token: Token) {
-            guard let regex else { return }
-            for match in regex.matches(in: code, options: [], range: full) {
-                let r = match.range
-                guard r.location != NSNotFound, r.length > 0 else { continue }
-                let end = min(r.location + r.length, length)
-                for k in r.location..<end { tokens[k] = token.rawValue }
+        func mark<Output>(_ regex: Regex<Output>, _ color: Color) {
+            for match in code.matches(of: regex) {
+                guard let lower = AttributedString.Index(match.range.lowerBound, within: result),
+                      let upper = AttributedString.Index(match.range.upperBound, within: result) else {
+                    continue
+                }
+                result[lower..<upper].foregroundColor = color
             }
         }
 
         let lang = language.lowercased()
-        mark(typeRegex, .type)
-        mark(keywordRegex, .keyword)
-        mark(numberRegex, .number)
-        mark(stringRegex, .string)
+        mark(typeRegex, Color(hex: 0x8FCBFF))
+        mark(keywordRegex, Color(hex: 0xB9A7FF))
+        mark(numberRegex, Color(hex: 0xF5C38B))
+        mark(stringRegex, Color(hex: 0x9FE0B8))
         if hashLanguages.contains(lang) {
-            mark(hashCommentRegex, .comment)
+            mark(hashCommentRegex, Color(hex: 0x6E7385))
         } else if dashLanguages.contains(lang) {
-            mark(dashCommentRegex, .comment)
+            mark(dashCommentRegex, Color(hex: 0x6E7385))
         } else {
-            mark(slashCommentRegex, .comment)
+            mark(slashCommentRegex, Color(hex: 0x6E7385))
         }
 
-        var result = AttributedString()
-        var start = 0
-        while start < length {
-            let token = tokens[start]
-            var end = start + 1
-            while end < length && tokens[end] == token { end += 1 }
-            var piece = AttributedString(ns.substring(with: NSRange(location: start, length: end - start)))
-            piece.foregroundColor = color(for: Token(rawValue: token) ?? .plain)
-            result.append(piece)
-            start = end
-        }
         return result
-    }
-
-    private static func color(for token: Token) -> Color {
-        switch token {
-        case .plain: return Palette.codeText
-        case .keyword: return Color(hex: 0xB9A7FF)
-        case .string: return Color(hex: 0x9FE0B8)
-        case .number: return Color(hex: 0xF5C38B)
-        case .comment: return Color(hex: 0x6E7385)
-        case .type: return Color(hex: 0x8FCBFF)
-        }
     }
 }

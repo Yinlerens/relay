@@ -1,13 +1,6 @@
 import SwiftUI
 import UIKit
 
-private struct BottomSentinelKey: PreferenceKey {
-    static let defaultValue: CGFloat = .infinity
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = min(value, nextValue())
-    }
-}
-
 struct ChatView: View {
     let sessionId: String
 
@@ -19,8 +12,8 @@ struct ChatView: View {
     @State private var showQuota = false
     @State private var showSwarm = false
     @State private var isAtBottom = true
-    @State private var viewportHeight: CGFloat = 0
     @State private var lightbox: Attachment?
+    @Namespace private var imageZoomNamespace
 
     private let bottomID = "chat-bottom"
 
@@ -51,7 +44,12 @@ struct ChatView: View {
                     }
 
                     ForEach(messages) { message in
-                        MessageRow(message: message, style: style, agentName: agentName) { attachment in
+                        MessageRow(
+                            message: message,
+                            style: style,
+                            agentName: agentName,
+                            imageNamespace: imageZoomNamespace
+                        ) { attachment in
                             lightbox = attachment
                         }
                         .equatable()
@@ -65,14 +63,6 @@ struct ChatView: View {
                     Color.clear
                         .frame(height: 1)
                         .id(bottomID)
-                        .background(
-                            GeometryReader { geo in
-                                Color.clear.preference(
-                                    key: BottomSentinelKey.self,
-                                    value: geo.frame(in: .named("chat-scroll")).minY
-                                )
-                            }
-                        )
                 }
                 .padding(.horizontal, 18)
                 .padding(.top, 14)
@@ -80,18 +70,13 @@ struct ChatView: View {
                 .frame(maxWidth: 780)
                 .frame(maxWidth: .infinity)
             }
-            .coordinateSpace(name: "chat-scroll")
             .defaultScrollAnchor(.bottom)
+            .scrollEdgeEffectStyle(.soft, for: .all)
             .scrollDismissesKeyboard(.interactively)
-            .background(
-                GeometryReader { geo in
-                    Color.clear
-                        .onAppear { viewportHeight = geo.size.height }
-                        .onChange(of: geo.size.height) { _, height in viewportHeight = height }
-                }
-            )
-            .onPreferenceChange(BottomSentinelKey.self) { minY in
-                let atBottom = minY <= viewportHeight + 90
+            .onScrollGeometryChange(for: Bool.self) { geo in
+                let distance = geo.contentSize.height - (geo.contentOffset.y + geo.containerSize.height - geo.contentInsets.bottom)
+                return distance <= 90
+            } action: { _, atBottom in
                 if atBottom != isAtBottom {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                         isAtBottom = atBottom
@@ -181,7 +166,7 @@ struct ChatView: View {
                     } label: {
                         Image(systemName: SwarmTheme.style.symbol)
                             .foregroundStyle(swarm.isAnyRunning ? SwarmTheme.style.tint : Palette.textPrimary)
-                            .symbolEffect(.pulse, options: .repeating, isActive: swarm.isAnyRunning)
+                            .symbolEffect(.breathe, options: .repeating, isActive: swarm.isAnyRunning)
                     }
                     .accessibilityLabel("蜂群总览")
                 }
@@ -197,7 +182,7 @@ struct ChatView: View {
                     ContextInfoView(session: session, tint: style.tint) {
                         showContextInfo = false
                         Task {
-                            try? await Task.sleep(nanoseconds: 380_000_000)
+                            try? await Task.sleep(for: .milliseconds(380))
                             showQuota = true
                         }
                     }
@@ -218,6 +203,7 @@ struct ChatView: View {
         }
         .fullScreenCover(item: $lightbox) { attachment in
             LightboxView(attachment: attachment)
+                .navigationTransition(.zoom(sourceID: attachment.id, in: imageZoomNamespace))
         }
         .sheet(isPresented: $showQuota) {
             QuotaSheet(focusAgent: session?.agentId)
@@ -283,11 +269,11 @@ struct ScrollToBottomPill: View {
                     .font(.system(size: 13, weight: .semibold))
             }
             .foregroundStyle(Palette.textPrimary)
-            .padding(.horizontal, 15)
-            .frame(height: 38)
-            .glassCapsule(interactive: true)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
         }
-        .buttonStyle(.pressable)
+        .buttonStyle(.glass)
+        .buttonBorderShape(.capsule)
     }
 }
 

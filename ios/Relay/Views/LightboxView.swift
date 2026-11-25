@@ -12,17 +12,11 @@ struct LightboxView: View {
     @State private var baseScale: CGFloat = 1
     @State private var offset: CGSize = .zero
     @State private var baseOffset: CGSize = .zero
-    @State private var dismissDrag: CGFloat = 0
     @State private var chromeVisible = true
-
-    private var backdropOpacity: Double {
-        1 - min(Double(abs(dismissDrag)) / 500, 0.7)
-    }
 
     var body: some View {
         ZStack {
             Color.black
-                .opacity(backdropOpacity)
                 .ignoresSafeArea()
 
             if let image {
@@ -30,8 +24,9 @@ struct LightboxView: View {
                     .resizable()
                     .scaledToFit()
                     .scaleEffect(scale)
-                    .offset(x: offset.width, y: offset.height + dismissDrag)
-                    .gesture(magnify.simultaneously(with: drag))
+                    .offset(offset)
+                    .gesture(magnify)
+                    .gesture(panDrag, isEnabled: scale > 1.01)
                     .onTapGesture(count: 2) {
                         Haptics.tap(.soft)
                         withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
@@ -62,10 +57,10 @@ struct LightboxView: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.white)
-                        .frame(width: 42, height: 42)
-                        .glassCircle()
+                        .frame(width: 34, height: 34)
                 }
-                .buttonStyle(.pressable)
+                .buttonStyle(.glass)
+                .buttonBorderShape(.circle)
                 .padding(.trailing, 18)
                 .padding(.top, 8)
                 .transition(.opacity)
@@ -124,27 +119,16 @@ struct LightboxView: View {
             }
     }
 
-    private var drag: some Gesture {
+    private var panDrag: some Gesture {
         DragGesture()
             .onChanged { value in
-                if scale > 1.01 {
-                    offset = CGSize(
-                        width: baseOffset.width + value.translation.width,
-                        height: baseOffset.height + value.translation.height
-                    )
-                } else {
-                    dismissDrag = value.translation.height
-                }
+                offset = CGSize(
+                    width: baseOffset.width + value.translation.width,
+                    height: baseOffset.height + value.translation.height
+                )
             }
-            .onEnded { value in
-                if scale > 1.01 {
-                    baseOffset = offset
-                } else if abs(value.translation.height) > 140 || abs(value.predictedEndTranslation.height) > 420 {
-                    Haptics.tap(.soft)
-                    dismiss()
-                } else {
-                    withAnimation(.spring(response: 0.36, dampingFraction: 0.8)) { dismissDrag = 0 }
-                }
+            .onEnded { _ in
+                baseOffset = offset
             }
     }
 

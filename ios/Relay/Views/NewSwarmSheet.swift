@@ -122,7 +122,6 @@ struct NewSwarmSheet: View {
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
-        .relaySheetBackground()
         .task {
             if coordinatorAgentId == nil {
                 coordinatorAgentId = store.agents.first(where: { $0.id == "agy" })?.id ?? store.agents.first?.id

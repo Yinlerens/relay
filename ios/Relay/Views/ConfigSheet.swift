@@ -103,7 +103,6 @@ struct ConfigSheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .presentationContentInteraction(.scrolls)
-        .relaySheetBackground()
     }
 
     /// Hide `model` / `mode` config options when dedicated model/mode lists already cover them.

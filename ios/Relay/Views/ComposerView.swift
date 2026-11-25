@@ -61,6 +61,7 @@ struct ComposerView: View {
     @State private var showFileImporter = false
     @State private var isSending = false
     @FocusState private var focused: Bool
+    @Namespace private var composerGlassNamespace
 
     private static let maxUploadBytes = 25 * 1024 * 1024
 
@@ -93,16 +94,17 @@ struct ComposerView: View {
     var body: some View {
         let matches = slashMatches
 
-        VStack(spacing: 10) {
-            if !matches.isEmpty {
-                SlashCommandTray(commands: matches, style: style) { command in
-                    text = "/\(command.name) "
-                    Haptics.selection()
+        GlassGroup(spacing: 10) {
+            VStack(spacing: 10) {
+                if !matches.isEmpty {
+                    SlashCommandTray(commands: matches, style: style) { command in
+                        text = "/\(command.name) "
+                        Haptics.selection()
+                    }
+                    .glassEffectID("slash-tray", in: composerGlassNamespace)
+                    .transition(.move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.97, anchor: .bottom)))
                 }
-                .transition(.move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.97, anchor: .bottom)))
-            }
 
-            GlassGroup(spacing: 10) {
                 VStack(spacing: 0) {
                     if !attachments.isEmpty {
                         attachmentStrip
@@ -127,6 +129,7 @@ struct ComposerView: View {
                     .padding(.vertical, 6)
                 }
                 .glassRounded(26, tint: focused ? style.glow : nil)
+                .glassEffectID("composer-bar", in: composerGlassNamespace)
             }
         }
         .padding(.horizontal, 12)

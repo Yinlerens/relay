@@ -57,7 +57,7 @@ def main() -> None:
                         "localizedDescription": desc,
                         "downloadURL": ipa_url,
                         "size": ipa_size,
-                        "minOSVersion": "17.0",
+                        "minOSVersion": "26.0",
                     }
                 ],
             }

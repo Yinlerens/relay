@@ -1,29 +1,17 @@
 import SwiftUI
 
-// MARK: - Liquid Glass with graceful fallback
+// MARK: - Native iOS 26 Liquid Glass
 
-/// iOS 26 Liquid Glass (`.glassEffect`) when built with Xcode 26 / Swift 6.2 and running on iOS 26,
-/// otherwise a refined `.ultraThinMaterial` surface with a specular hairline rim.
+/// Native iOS 26 Liquid Glass surface modifier.
 struct GlassSurface<S: Shape>: ViewModifier {
     var shape: S
     var interactive: Bool = false
     var tint: Color? = nil
-    var shadow: Bool = true
 
     func body(content: Content) -> some View {
-        #if compiler(>=6.2)
-        if #available(iOS 26.0, *) {
-            content.glassEffect(makeGlass(), in: shape)
-        } else {
-            fallback(content)
-        }
-        #else
-        fallback(content)
-        #endif
+        content.glassEffect(makeGlass(), in: shape)
     }
 
-    #if compiler(>=6.2)
-    @available(iOS 26.0, *)
     private func makeGlass() -> Glass {
         var glass = Glass.regular
         if let tint {
@@ -34,36 +22,11 @@ struct GlassSurface<S: Shape>: ViewModifier {
         }
         return glass
     }
-    #endif
-
-    @ViewBuilder
-    private func fallback(_ content: Content) -> some View {
-        content
-            .background {
-                ZStack {
-                    shape.fill(.ultraThinMaterial)
-                    if let tint {
-                        shape.fill(tint.opacity(0.10))
-                    }
-                }
-            }
-            .overlay {
-                shape.stroke(
-                    LinearGradient(
-                        colors: [Color.white.opacity(0.42), Color.white.opacity(0.06), Color.white.opacity(0.14)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 0.6
-                )
-            }
-            .shadow(color: .black.opacity(shadow ? 0.16 : 0), radius: 18, x: 0, y: 8)
-    }
 }
 
 extension View {
-    func glassSurface<S: Shape>(_ shape: S, interactive: Bool = false, tint: Color? = nil, shadow: Bool = true) -> some View {
-        modifier(GlassSurface(shape: shape, interactive: interactive, tint: tint, shadow: shadow))
+    func glassSurface<S: Shape>(_ shape: S, interactive: Bool = false, tint: Color? = nil) -> some View {
+        modifier(GlassSurface(shape: shape, interactive: interactive, tint: tint))
     }
 
     func glassCapsule(interactive: Bool = false, tint: Color? = nil) -> some View {
@@ -79,23 +42,15 @@ extension View {
     }
 }
 
-/// Groups glass elements so they morph/blend together on iOS 26.
+/// Groups glass elements inside a native `GlassEffectContainer` so they morph & blend smoothly on iOS 26.
 struct GlassGroup<Content: View>: View {
     var spacing: CGFloat = 14
     @ViewBuilder var content: Content
 
     var body: some View {
-        #if compiler(>=6.2)
-        if #available(iOS 26.0, *) {
-            GlassEffectContainer(spacing: spacing) {
-                content
-            }
-        } else {
+        GlassEffectContainer(spacing: spacing) {
             content
         }
-        #else
-        content
-        #endif
     }
 }
 
@@ -120,16 +75,6 @@ struct CardSurface: ViewModifier {
 extension View {
     func cardSurface(radius: CGFloat = 22) -> some View {
         modifier(CardSurface(radius: radius))
-    }
-
-    /// Sheet background: Liquid Glass sheets on iOS 26, soft material on earlier systems.
-    @ViewBuilder
-    func relaySheetBackground() -> some View {
-        if #available(iOS 26.0, *) {
-            self
-        } else {
-            self.presentationBackground(.regularMaterial)
-        }
     }
 }
 

@@ -207,12 +207,10 @@ struct CodeBuddyRateQuota: Decodable, Identifiable, Sendable {
 
 enum QuotaDates {
     static func parseISO8601(_ text: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: text) { return date }
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: text)
+        if let date = try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(text) {
+            return date
+        }
+        return try? Date.ISO8601FormatStyle().parse(text)
     }
 
     /// `4小时41分后重置` / `2天3小时后重置` / `12分钟后重置`

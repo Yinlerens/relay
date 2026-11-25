@@ -7,6 +7,7 @@ struct MessageRow: View, Equatable {
     let message: Message
     let style: AgentStyle
     let agentName: String
+    let imageNamespace: Namespace.ID
     var onOpenImage: (Attachment) -> Void
 
     nonisolated static func == (lhs: MessageRow, rhs: MessageRow) -> Bool {
@@ -16,7 +17,7 @@ struct MessageRow: View, Equatable {
     var body: some View {
         switch message.role {
         case .user:
-            UserMessageView(message: message, style: style, onOpenImage: onOpenImage)
+            UserMessageView(message: message, style: style, imageNamespace: imageNamespace, onOpenImage: onOpenImage)
         case .assistant:
             AssistantMessageView(message: message, style: style, agentName: agentName)
         }
@@ -28,6 +29,7 @@ struct MessageRow: View, Equatable {
 struct UserMessageView: View {
     let message: Message
     let style: AgentStyle
+    let imageNamespace: Namespace.ID
     var onOpenImage: (Attachment) -> Void
 
     private var images: [Attachment] { message.attachments.filter(\.isImage) }
@@ -108,6 +110,7 @@ struct UserMessageView: View {
                         )
                 }
                 .buttonStyle(.pressable)
+                .matchedTransitionSource(id: image.id, in: imageNamespace)
             }
             if images.count > 4 {
                 Text("+\(images.count - 4)")
@@ -234,7 +237,7 @@ struct AssistantMessageView: View {
                 Haptics.success()
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { copied = true }
                 Task {
-                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    try? await Task.sleep(for: .milliseconds(1500))
                     withAnimation(.easeOut(duration: 0.2)) { copied = false }
                 }
             } label: {

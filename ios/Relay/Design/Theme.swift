@@ -77,7 +77,7 @@ enum RelayFont {
 
 // MARK: - Appearance
 
-enum AppearanceMode: String, CaseIterable, Identifiable {
+enum AppearanceMode: String, CaseIterable, Identifiable, Sendable {
     case system
     case dark
     case light
@@ -137,8 +137,8 @@ enum SettingsKey {
 
 // MARK: - Agent signature styling
 
-struct AgentStyle: Equatable {
-    enum Family: String {
+struct AgentStyle: Equatable, Sendable {
+    enum Family: String, Sendable {
         case indigo
         case emerald
         case amber

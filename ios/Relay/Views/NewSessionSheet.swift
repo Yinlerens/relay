@@ -94,7 +94,6 @@ struct NewSessionSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .relaySheetBackground()
         .task {
             if selectedAgent == nil { selectedAgent = store.agents.first?.id }
             if selectedCwd.isEmpty { selectedCwd = store.defaultCwd }

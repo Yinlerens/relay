@@ -1,56 +1,22 @@
 import SwiftUI
 
-/// Brand mark drawn natively: layered glass panes + geometric "R" + relay node (mirrors the App Icon).
+/// Brand mark rendered directly from the unified AI App Icon artwork (`RelayBrandIcon`).
 struct RelayMark: View {
     var size: CGFloat = 88
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [Color(hex: 0xA7B0FF).opacity(0.9), Color(hex: 0x4B4FCF).opacity(0.85)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .frame(width: size * 0.82, height: size * 0.82)
-                .rotationEffect(.degrees(-8))
-                .offset(x: -size * 0.12, y: -size * 0.12)
-
-            RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
-                .fill(Color(hex: 0x17171F))
-                .frame(width: size * 0.88, height: size * 0.88)
-                .overlay(
-                    RoundedRectangle(cornerRadius: size * 0.3, style: .continuous)
-                        .stroke(
-                            LinearGradient(
-                                colors: [Color.white.opacity(0.55), Color.white.opacity(0.05)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 1
-                        )
-                )
-                .shadow(color: .black.opacity(0.45), radius: size * 0.18, y: size * 0.08)
-                .offset(x: size * 0.08, y: size * 0.08)
-
-            Text("R")
-                .font(.system(size: size * 0.5, weight: .bold, design: .rounded))
-                .foregroundStyle(
-                    LinearGradient(colors: [.white, Color(hex: 0xC9CCE6)], startPoint: .top, endPoint: .bottom)
-                )
-                .shadow(color: Color(hex: 0x8E9BFF).opacity(0.7), radius: size * 0.08)
-                .offset(x: size * 0.06, y: size * 0.06)
-
-            Circle()
-                .fill(LinearGradient(colors: [Color(hex: 0xB9FFF0), Color(hex: 0x2BD4A8)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                .frame(width: size * 0.16, height: size * 0.16)
-                .shadow(color: Color(hex: 0x7CF5D3).opacity(0.8), radius: size * 0.08)
-                .offset(x: size * 0.3, y: size * 0.3)
-        }
-        .frame(width: size * 1.15, height: size * 1.15)
-        .accessibilityHidden(true)
+        let shape = RoundedRectangle(cornerRadius: size * 0.225, style: .continuous)
+        Image("RelayBrandIcon")
+            .resizable()
+            .interpolation(.high)
+            .scaledToFill()
+            .frame(width: size, height: size)
+            .clipShape(shape)
+            .overlay(
+                shape.stroke(Palette.hairlineStrong, lineWidth: 0.6)
+            )
+            .shadow(color: .black.opacity(0.18), radius: size * 0.14, y: size * 0.06)
+            .accessibilityHidden(true)
     }
 }
 
