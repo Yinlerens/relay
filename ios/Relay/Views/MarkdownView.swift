@@ -35,7 +35,7 @@ struct MDNode: Identifiable, Hashable {
 enum MarkdownParser {
     static func parse(_ raw: String) -> [MDNode] {
         let text = raw.replacingOccurrences(of: "\r\n", with: "\n")
-        let lines = text.components(separatedBy: "\n")
+        var lines = text.components(separatedBy: "\n")
         var blocks: [MDBlock] = []
         var paragraph: [String] = []
         var i = 0
@@ -51,24 +51,42 @@ enum MarkdownParser {
             let line = lines[i]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
-            // Fenced code
-            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+            // Fenced code (strict info validation + recovery for glued closing fences / inline spans)
+            if let open = fencePrefix(trimmed) {
+                if !isValidFenceInfo(open.rest, fenceChar: open.char) {
+                    // Stray/orphan fence glued directly to prose (e.g. ```这是...); strip fence and parse normally.
+                    lines[i] = open.rest
+                    continue
+                }
                 flushParagraph()
-                let fence = String(trimmed.prefix(3))
-                let language = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                let language = displayLanguage(from: open.rest)
                 var codeLines: [String] = []
                 var closed = false
                 i += 1
                 while i < lines.count {
-                    if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix(fence) {
-                        closed = true
-                        i += 1
-                        break
+                    let innerTrimmed = lines[i].trimmingCharacters(in: .whitespaces)
+                    if let close = fencePrefix(innerTrimmed), close.char == open.char, close.count >= open.count {
+                        if close.rest.isEmpty {
+                            closed = true
+                            i += 1
+                            break
+                        } else if !isValidFenceInfo(close.rest, fenceChar: close.char) {
+                            // Closing fence glued directly to trailing prose; close block and re-parse remainder.
+                            closed = true
+                            lines[i] = close.rest
+                            break
+                        }
                     }
                     codeLines.append(lines[i])
                     i += 1
                 }
                 blocks.append(.code(language: language, code: codeLines.joined(separator: "\n"), closed: closed))
+                continue
+            }
+
+            if let split = splitInlineTrailingFence(line) {
+                lines[i] = split.before
+                lines.insert(split.fenceLine, at: i + 1)
                 continue
             }
 
@@ -149,6 +167,52 @@ enum MarkdownParser {
         flushParagraph()
 
         return blocks.enumerated().map { MDNode(id: $0.offset, block: $0.element) }
+    }
+
+    private static func fencePrefix(_ trimmed: String) -> (char: Character, count: Int, rest: String)? {
+        guard let first = trimmed.first, first == "`" || first == "~" else { return nil }
+        var count = 0
+        for ch in trimmed {
+            if ch == first { count += 1 } else { break }
+        }
+        guard count >= 3 else { return nil }
+        let rest = String(trimmed.dropFirst(count)).trimmingCharacters(in: .whitespaces)
+        return (first, count, rest)
+    }
+
+    private static func isValidFenceInfo(_ info: String, fenceChar: Character) -> Bool {
+        if info.isEmpty { return true }
+        if fenceChar == "`" && info.contains("`") { return false }
+        if info.count > 48 { return false }
+        guard info.unicodeScalars.allSatisfy({ $0.isASCII && $0.value >= 0x20 && $0.value <= 0x7E }) else {
+            return false
+        }
+        let parts = info.split(whereSeparator: \.isWhitespace)
+        guard let first = parts.first, !first.isEmpty, first.count <= 24 else { return false }
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_+#.-/")
+        guard first.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return false }
+        if info.contains("\"") || info.contains("'") { return false }
+        if parts.count > 1, let last = info.last, ".?!:;".contains(last) {
+            return false
+        }
+        return true
+    }
+
+    private static func displayLanguage(from info: String) -> String {
+        info.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
+    }
+
+    private static func splitInlineTrailingFence(_ line: String) -> (before: String, fenceLine: String)? {
+        guard let firstRange = line.range(of: "```") else { return nil }
+        if line[firstRange.upperBound...].range(of: "```") != nil {
+            // Multiple ``` occurrences on one line belong to an inline code span, not a block fence.
+            return nil
+        }
+        let before = String(line[..<firstRange.lowerBound])
+        let after = String(line[firstRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+        guard !before.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        guard isValidFenceInfo(after, fenceChar: "`") else { return nil }
+        return (before, "```" + after)
     }
 
     private static func headingInfo(_ line: String) -> (level: Int, text: String)? {
@@ -401,6 +465,8 @@ struct CodeBlockCard: View {
                 Text(language.isEmpty ? "code" : language.lowercased())
                     .font(RelayFont.mono(11, weight: .semibold))
                     .foregroundStyle(Color.white.opacity(0.72))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
                     .background(Capsule().fill(Color.white.opacity(0.08)))

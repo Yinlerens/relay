@@ -77,6 +77,8 @@ interface ActiveTurn {
   seenUsageIds: Set<string>;
   cancelled: boolean;
   userCancelled: boolean;
+  acceptingUpdates: boolean;
+  sawToolSinceLastText: boolean;
   lastFlushAt: number;
 }
 
@@ -663,6 +665,7 @@ export class SessionManager {
     const turn = this.activeTurns.get(sessionId);
     if (turn) {
       turn.cancelled = true;
+      turn.acceptingUpdates = false;
       this.activeTurns.delete(sessionId);
     }
     const worker = this.workers.get(sessionId);
@@ -678,6 +681,7 @@ export class SessionManager {
     const turn = this.activeTurns.get(sessionId);
     if (turn) {
       turn.cancelled = true;
+      turn.acceptingUpdates = false;
       this.activeTurns.delete(sessionId);
     }
     const worker = this.workers.get(sessionId);
@@ -871,6 +875,8 @@ export class SessionManager {
       seenUsageIds: new Set<string>(),
       cancelled: false,
       userCancelled: false,
+      acceptingUpdates: false,
+      sawToolSinceLastText: false,
       lastFlushAt: Date.now(),
     };
     this.activeTurns.set(sessionId, turn);
@@ -893,7 +899,42 @@ export class SessionManager {
   ): Promise<void> {
     try {
       const worker = await this.ensureWorker(session);
+      if (this.disposed) return;
+      if (turn.cancelled) {
+        this.db.updateMessage(turn.assistantMessageId, {
+          content: turn.content,
+          thinking: turn.thinking,
+          toolCalls: turn.toolCalls,
+          usage: turn.usage,
+          status: "cancelled",
+        });
+        this.db.updateSession(session.id, { updatedAt: Date.now() });
+        this.activeTurns.delete(session.id);
+
+        const latestSession = this.db.getSession(session.id, this.getRunningSessionIds());
+        this.emit("turn_completed", session.id, {
+          messageId: turn.assistantMessageId,
+          stopReason: "cancelled",
+          status: "cancelled",
+          usage: turn.usage,
+          session: latestSession,
+        });
+        this.notifyTurnFinished({
+          sessionId: session.id,
+          session: latestSession,
+          assistantMessageId: turn.assistantMessageId,
+          content: turn.content,
+          thinking: turn.thinking,
+          status: "cancelled",
+          stopReason: "cancelled",
+          userCancelled: turn.userCancelled,
+        });
+        return;
+      }
+
+      turn.acceptingUpdates = true;
       const res = await worker.client.prompt(worker.acpSessionId, promptBlocks);
+      turn.acceptingUpdates = false;
       this.refreshIdleTimer(worker);
 
       const stopReason = typeof res.stopReason === "string" ? res.stopReason : "end_turn";
@@ -945,6 +986,7 @@ export class SessionManager {
         );
       }
     } catch (err) {
+      turn.acceptingUpdates = false;
       if (this.disposed) return;
       const errMsg = err instanceof Error ? err.message : String(err);
       const finalContent = turn.content
@@ -1023,7 +1065,8 @@ export class SessionManager {
     if (!update || typeof update !== "object") return;
 
     const kind = typeof update.sessionUpdate === "string" ? update.sessionUpdate : "";
-    const turn = this.activeTurns.get(sessionId);
+    const activeTurn = this.activeTurns.get(sessionId);
+    const turn = activeTurn?.acceptingUpdates ? activeTurn : undefined;
 
     switch (kind) {
       case "agent_thought_chunk": {
@@ -1041,11 +1084,22 @@ export class SessionManager {
       case "agent_message_chunk": {
         const text = extractChunkText(update.content);
         if (!text || !turn) return;
-        turn.content += text;
+        let delta = text;
+        if (turn.sawToolSinceLastText) {
+          turn.sawToolSinceLastText = false;
+          if (turn.content.length > 0 && !text.startsWith("\n")) {
+            if (!turn.content.endsWith("\n")) {
+              delta = `\n\n${text}`;
+            } else if (!turn.content.endsWith("\n\n")) {
+              delta = `\n${text}`;
+            }
+          }
+        }
+        turn.content += delta;
         this.flushTurnIfNeeded(turn);
         this.emit("text_delta", sessionId, {
           messageId: turn.assistantMessageId,
-          delta: text,
+          delta,
         });
         break;
       }
@@ -1069,6 +1123,9 @@ export class SessionManager {
 
         const idx = turn.toolCalls.findIndex((t) => t.id === toolCallId);
         if (idx === -1) {
+          if (turn.content.length > 0) {
+            turn.sawToolSinceLastText = true;
+          }
           turn.toolCalls.push({
             id: toolCallId,
             name,
