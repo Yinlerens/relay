@@ -28,12 +28,29 @@ export function extractBearerToken(request: FastifyRequest): string | undefined 
   return undefined;
 }
 
-export function makeAuthHook(expectedToken: string) {
+export function makeAuthHook(expectedToken: string, internalMcpToken?: string) {
   return async function requireAuth(
     request: FastifyRequest,
     reply: FastifyReply
   ): Promise<void> {
-    if (request.url === "/healthz") {
+    const pathname = request.url.split("?")[0];
+    if (pathname === "/healthz") {
+      return;
+    }
+    if (pathname.startsWith("/internal/mcp/")) {
+      if (
+        request.headers["x-forwarded-for"] !== undefined ||
+        request.headers["x-real-ip"] !== undefined
+      ) {
+        await reply.code(403).send({ error: "Forbidden" });
+        return;
+      }
+      const rawInternal = request.headers["x-relay-internal-token"];
+      const candidateInternal = Array.isArray(rawInternal) ? rawInternal[0] : rawInternal;
+      if (!internalMcpToken || !verifyToken(candidateInternal?.trim(), internalMcpToken)) {
+        await reply.code(403).send({ error: "Forbidden" });
+        return;
+      }
       return;
     }
     const candidate = extractBearerToken(request);

@@ -13,18 +13,26 @@ struct SessionListView: View {
     @State private var search = ""
     @State private var showSettings = false
     @State private var showNewSession = false
+    @State private var showNewSwarm = false
     @State private var showQuota = false
     @State private var renameTarget: SessionSummary?
     @State private var renameText = ""
     @State private var showRename = false
 
     private var filtered: [SessionSummary] {
+        let base = store.topLevelSessions
         let query = search.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !query.isEmpty else { return store.sessions }
-        return store.sessions.filter { s in
-            s.title.lowercased().contains(query)
-                || (store.agent(for: s.agentId)?.name.lowercased().contains(query) ?? false)
-                || (s.currentModelName?.lowercased().contains(query) ?? false)
+        guard !query.isEmpty else { return base }
+        return base.filter { s in
+            if s.title.lowercased().contains(query) { return true }
+            if store.agent(for: s.agentId)?.name.lowercased().contains(query) ?? false { return true }
+            if s.currentModelName?.lowercased().contains(query) ?? false { return true }
+            if let sw = store.swarm(forSessionId: s.id) {
+                if sw.title.lowercased().contains(query) { return true }
+                if sw.members.contains(where: { $0.name.lowercased().contains(query) }) { return true }
+                if "蜂群".contains(query) || "swarm".contains(query) { return true }
+            }
+            return false
         }
     }
 
@@ -58,7 +66,7 @@ struct SessionListView: View {
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 6, trailing: 20))
 
-                if store.sessions.isEmpty && store.hasBootstrapped {
+                if store.topLevelSessions.isEmpty && store.hasBootstrapped {
                     emptyState
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
@@ -141,6 +149,11 @@ struct SessionListView: View {
                             }
                         }
                         Button {
+                            showNewSwarm = true
+                        } label: {
+                            Label("新建蜂群协作…", systemImage: SwarmTheme.style.symbol)
+                        }
+                        Button {
                             showNewSession = true
                         } label: {
                             Label("选择工作区…", systemImage: "folder")
@@ -156,7 +169,10 @@ struct SessionListView: View {
             }
             .safeAreaInset(edge: .bottom) {
                 if !store.agents.isEmpty {
-                    AgentDock(onCreate: quickCreate)
+                    AgentDock(onCreate: quickCreate) {
+                        Haptics.tap(.medium)
+                        showNewSwarm = true
+                    }
                 }
             }
         }
@@ -165,11 +181,21 @@ struct SessionListView: View {
         }
         .sheet(isPresented: $showNewSession) {
             NewSessionSheet { created in
-                path.append(created.id)
+                openSession(created.id)
+            }
+        }
+        .sheet(isPresented: $showNewSwarm) {
+            NewSwarmSheet { created in
+                openSession(created.session.id)
             }
         }
         .sheet(isPresented: $showQuota) {
             QuotaSheet()
+        }
+        .onChange(of: store.pendingOpenSessionId) { _, targetId in
+            guard let targetId else { return }
+            store.pendingOpenSessionId = nil
+            openSession(targetId)
         }
         .task(id: store.hasBootstrapped) {
             if store.hasBootstrapped && store.quotas == nil {
@@ -194,7 +220,7 @@ struct SessionListView: View {
     private func row(for session: SessionSummary) -> some View {
         Button {
             Haptics.tap(.soft)
-            path.append(session.id)
+            openSession(session.id)
         } label: {
             SessionRow(session: session)
         }
@@ -205,7 +231,7 @@ struct SessionListView: View {
         .alignmentGuide(.listRowSeparatorLeading) { _ in 58 }
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             Button(role: .destructive) {
-                Task { await store.delete(session.id) }
+                deleteSessionOrSwarm(session)
             } label: {
                 Label("删除", systemImage: "trash")
             }
@@ -232,9 +258,9 @@ struct SessionListView: View {
             }
             Divider()
             Button(role: .destructive) {
-                Task { await store.delete(session.id) }
+                deleteSessionOrSwarm(session)
             } label: {
-                Label("删除会话", systemImage: "trash")
+                Label(session.isSwarmCoordinator ? "删除蜂群" : "删除会话", systemImage: "trash")
             }
         }
     }
@@ -347,9 +373,36 @@ struct SessionListView: View {
         Haptics.tap(.medium)
         Task {
             if let created = await store.createSession(agentId: agentId) {
-                path.append(created.id)
+                openSession(created.id)
             }
         }
+    }
+
+    private func deleteSessionOrSwarm(_ session: SessionSummary) {
+        if session.isSwarmCoordinator, let sw = store.swarm(forSessionId: session.id) {
+            Task { await store.deleteSwarm(sw.id) }
+        } else {
+            Task { await store.delete(session.id) }
+        }
+    }
+
+    /// Safely navigates to `targetId` without pushing duplicates onto the stack.
+    private func openSession(_ targetId: String) {
+        if path.last == targetId { return }
+        if let existingIndex = path.firstIndex(of: targetId) {
+            path = Array(path.prefix(through: existingIndex))
+            return
+        }
+        if path.count >= 2,
+           let topId = path.last,
+           let topSwarm = store.swarm(forSessionId: topId),
+           let targetSwarm = store.swarm(forSessionId: targetId),
+           topSwarm.id == targetSwarm.id,
+           topId != topSwarm.coordinatorSessionId {
+            path[path.count - 1] = targetId
+            return
+        }
+        path.append(targetId)
     }
 }
 
@@ -362,13 +415,26 @@ struct SessionRow: View {
     var body: some View {
         let style = store.style(for: session.agentId)
         let agentName = store.agent(for: session.agentId)?.name ?? session.agentId
+        let swarm = session.isSwarmCoordinator ? store.swarm(forSessionId: session.id) : nil
+        let isRunning = session.isRunning || (swarm?.isAnyRunning ?? false)
 
         HStack(spacing: 14) {
-            AgentGlyph(style: style, size: 44, isRunning: session.isRunning)
+            ZStack(alignment: .bottomTrailing) {
+                AgentGlyph(style: style, size: 44, isRunning: isRunning)
+                if swarm != nil {
+                    Image(systemName: SwarmTheme.style.symbol)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 19, height: 19)
+                        .background(Circle().fill(SwarmTheme.style.gradient))
+                        .overlay(Circle().stroke(Palette.canvas, lineWidth: 1.8))
+                        .offset(x: 4, y: 4)
+                }
+            }
 
             VStack(alignment: .leading, spacing: 5) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text(session.title)
+                    Text(swarm?.title.isEmpty == false ? (swarm?.title ?? session.title) : session.title)
                         .font(.system(size: 16.5, weight: .semibold))
                         .foregroundStyle(Palette.textPrimary)
                         .lineLimit(1)
@@ -379,41 +445,78 @@ struct SessionRow: View {
                         .foregroundStyle(Palette.textTertiary)
                 }
 
-                HStack(spacing: 6) {
-                    Text(agentName)
-                        .foregroundStyle(style.tint)
-                        .fontWeight(.semibold)
-                    if let model = session.currentModelName {
-                        Text("·").foregroundStyle(Palette.textTertiary)
-                        Text(model)
-                            .foregroundStyle(Palette.textSecondary)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 4)
-                    if session.isRunning {
-                        HStack(spacing: 2) {
-                            PulseDot(color: style.tint, size: 6)
-                            Text("运行中")
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundStyle(style.tint)
+                if let swarm {
+                    HStack(spacing: 6) {
+                        HStack(spacing: 4) {
+                            Image(systemName: SwarmTheme.style.symbol)
+                                .font(.system(size: 9.5, weight: .bold))
+                            Text("蜂群 · \(swarm.liveMemberCount) 成员")
                         }
-                        .transition(.scale.combined(with: .opacity))
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(SwarmTheme.style.tint)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(Capsule().fill(SwarmTheme.style.wash))
+                        .overlay(Capsule().stroke(SwarmTheme.style.tint.opacity(0.25), lineWidth: 0.5))
+
+                        if swarm.totalCredits > 0 {
+                            Text("\(RelayFormat.credits(swarm.totalCredits)) 积分")
+                                .font(.system(size: 12, weight: .medium))
+                                .monospacedDigit()
+                                .foregroundStyle(Palette.textSecondary)
+                                .lineLimit(1)
+                        }
+
+                        Spacer(minLength: 4)
+
+                        if isRunning {
+                            HStack(spacing: 2) {
+                                PulseDot(color: SwarmTheme.style.tint, size: 6)
+                                Text("\(max(1, swarm.runningCount)) 运行中")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(SwarmTheme.style.tint)
+                            }
+                            .transition(.scale.combined(with: .opacity))
+                        }
                     }
+                } else {
+                    HStack(spacing: 6) {
+                        Text(agentName)
+                            .foregroundStyle(style.tint)
+                            .fontWeight(.semibold)
+                        if let model = session.currentModelName {
+                            Text("·").foregroundStyle(Palette.textTertiary)
+                            Text(model)
+                                .foregroundStyle(Palette.textSecondary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 4)
+                        if session.isRunning {
+                            HStack(spacing: 2) {
+                                PulseDot(color: style.tint, size: 6)
+                                Text("运行中")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(style.tint)
+                            }
+                            .transition(.scale.combined(with: .opacity))
+                        }
+                    }
+                    .font(.system(size: 13))
                 }
-                .font(.system(size: 13))
             }
         }
         .padding(.vertical, 6)
         .contentShape(Rectangle())
-        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: session.isRunning)
+        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isRunning)
     }
 }
 
-// MARK: - Agent dock (quick new session)
+// MARK: - Agent dock (quick new session & swarm)
 
 struct AgentDock: View {
     @Environment(AppStore.self) private var store
     var onCreate: (String) -> Void
+    var onCreateSwarm: () -> Void
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -452,6 +555,34 @@ struct AgentDock: View {
                         .buttonStyle(.pressable)
                         .disabled(creating)
                     }
+
+                    Button(action: onCreateSwarm) {
+                        HStack(spacing: 9) {
+                            ZStack {
+                                if store.creatingSwarm {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                } else {
+                                    AgentGlyph(style: SwarmTheme.style, size: 26)
+                                }
+                            }
+                            .frame(width: 26, height: 26)
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text("蜂群")
+                                    .font(.system(size: 14.5, weight: .semibold))
+                                    .foregroundStyle(Palette.textPrimary)
+                                Text(store.creatingSwarm ? "正在启动…" : "多 Agent 协作")
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .foregroundStyle(Palette.textSecondary)
+                            }
+                        }
+                        .padding(.leading, 10)
+                        .padding(.trailing, 16)
+                        .frame(height: 50)
+                        .glassCapsule(interactive: true, tint: SwarmTheme.style.glow)
+                    }
+                    .buttonStyle(.pressable)
+                    .disabled(store.creatingSwarm)
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 8)

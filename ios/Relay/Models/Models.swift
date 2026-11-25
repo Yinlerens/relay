@@ -203,11 +203,17 @@ struct SessionSummary: Codable, Identifiable, Hashable, Sendable {
     var updatedAt: Double
     /// Sum of CodeBuddy credits charged across this session's assistant turns (server-computed, optional).
     var totalCredits: Double?
+    /// Swarm membership metadata (nil for standalone sessions).
+    var swarmId: String?
+    var swarmRole: String?
+    var swarmMemberName: String?
+    var worktreeBranch: String?
 
     enum CodingKeys: String, CodingKey {
         case id, agentId, acpSessionId, title, cwd, currentModelId, currentModeId
         case availableModels, availableModes, configOptions, availableCommands
         case contextUsed, contextSize, isRunning, createdAt, updatedAt, totalCredits
+        case swarmId, swarmRole, swarmMemberName, worktreeBranch
     }
 
     init(from decoder: Decoder) throws {
@@ -229,7 +235,14 @@ struct SessionSummary: Codable, Identifiable, Hashable, Sendable {
         createdAt = c.flexDouble(.createdAt)
         updatedAt = c.flexDouble(.updatedAt)
         totalCredits = c.flexOptionalDouble(.totalCredits)
+        swarmId = c.flexOptionalString(.swarmId)
+        swarmRole = c.flexOptionalString(.swarmRole)
+        swarmMemberName = c.flexOptionalString(.swarmMemberName)
+        worktreeBranch = c.flexOptionalString(.worktreeBranch)
     }
+
+    var isSwarmCoordinator: Bool { swarmRole == "coordinator" }
+    var isSwarmWorker: Bool { swarmRole == "worker" }
 
     var updatedDate: Date { Date(timeIntervalSince1970: updatedAt / 1000) }
 
@@ -427,15 +440,17 @@ struct ServerSettings: Codable, Hashable, Sendable {
 struct BootstrapResponse: Decodable, Sendable {
     var agents: [AgentInfo]
     var sessions: [SessionSummary]
+    var swarms: [SwarmSummary]
     var defaultCwd: String
     var settings: ServerSettings
 
-    enum CodingKeys: String, CodingKey { case agents, sessions, defaultCwd, settings }
+    enum CodingKeys: String, CodingKey { case agents, sessions, swarms, defaultCwd, settings }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         agents = c.flexArray(AgentInfo.self, .agents)
         sessions = c.flexArray(SessionSummary.self, .sessions)
+        swarms = c.flexArray(SwarmSummary.self, .swarms)
         defaultCwd = c.flexString(.defaultCwd)
         settings = (try? c.decodeIfPresent(ServerSettings.self, forKey: .settings)) ?? ServerSettings()
     }

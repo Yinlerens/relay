@@ -1,17 +1,24 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import type { AgentProfile, AppConfig } from "../config.js";
-import type { MessageRecord, RelayDatabase, SessionSummary } from "../db.js";
+import type {
+  MessageRecord,
+  MessageStatus,
+  RelayDatabase,
+  SessionSummary,
+} from "../db.js";
 import { sendBarkNotification } from "../utils/bark.js";
 import { AcpClient } from "./client.js";
 import type {
   AcpConfigOption,
   AcpModeInfo,
   AcpModelInfo,
+  AcpSessionLaunchOptions,
   AcpSlashCommand,
   AttachmentRef,
   ConfigValue,
   JsonRpcNotification,
+  SwarmRole,
   ToolActivityItem,
   UsageStats,
 } from "./types.js";
@@ -22,6 +29,35 @@ export interface WsEventEnvelope {
   payload: unknown;
   ts: number;
 }
+
+export type SessionLaunchHook = (
+  session: SessionSummary,
+  agent: AgentProfile
+) => AcpSessionLaunchOptions | undefined;
+
+export interface BeforePromptResult {
+  prefixSystemNote?: string;
+}
+
+export type BeforePromptHook = (
+  session: SessionSummary,
+  input: { text: string; source: "user" | "swarm" }
+) => BeforePromptResult | void;
+
+export interface TurnFinishedEvent {
+  sessionId: string;
+  session: SessionSummary | null;
+  assistantMessageId: string;
+  content: string;
+  thinking: string;
+  status: MessageStatus;
+  stopReason: string;
+  error?: string;
+  userCancelled: boolean;
+}
+
+export type TurnFinishedHook = (ev: TurnFinishedEvent) => void | Promise<void>;
+export type SessionDeletedHook = (session: SessionSummary) => void | Promise<void>;
 
 interface WorkerEntry {
   sessionId: string;
@@ -40,10 +76,12 @@ interface ActiveTurn {
   usage: UsageStats | null;
   seenUsageIds: Set<string>;
   cancelled: boolean;
+  userCancelled: boolean;
   lastFlushAt: number;
 }
 
 const IDLE_TTL_MS = 30 * 60_000;
+const MODEL_PROBE_TTL_MS = 10 * 60_000;
 
 export function roundCredits(value: number): number {
   return Math.round(value * 10_000) / 10_000;
@@ -233,6 +271,15 @@ export class SessionManager {
   private readonly workers = new Map<string, WorkerEntry>();
   private readonly activeTurns = new Map<string, ActiveTurn>();
   private readonly listeners = new Set<(ev: WsEventEnvelope) => void>();
+  private sessionLaunchHook: SessionLaunchHook | null = null;
+  private beforePromptHook: BeforePromptHook | null = null;
+  private readonly turnFinishedListeners = new Set<TurnFinishedHook>();
+  private readonly sessionDeletedListeners = new Set<SessionDeletedHook>();
+  private readonly modelProbeCache = new Map<
+    string,
+    { models: AcpModelInfo[]; defaultModelId: string | null; fetchedAt: number }
+  >();
+  private disposed = false;
 
   constructor(
     private readonly config: AppConfig,
@@ -248,13 +295,43 @@ export class SessionManager {
     return this.agents;
   }
 
+  hasAgent(agentId: string): boolean {
+    return this.agents.some((a) => a.id === agentId);
+  }
+
   getRunningSessionIds(): Set<string> {
     return new Set(this.activeTurns.keys());
+  }
+
+  isSessionRunning(sessionId: string): boolean {
+    return this.activeTurns.has(sessionId);
   }
 
   subscribe(fn: (ev: WsEventEnvelope) => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
+  }
+
+  setSessionLaunchHook(hook: SessionLaunchHook | null): void {
+    this.sessionLaunchHook = hook;
+  }
+
+  setBeforePromptHook(hook: BeforePromptHook | null): void {
+    this.beforePromptHook = hook;
+  }
+
+  onTurnFinished(hook: TurnFinishedHook): () => void {
+    this.turnFinishedListeners.add(hook);
+    return () => this.turnFinishedListeners.delete(hook);
+  }
+
+  onSessionDeleted(hook: SessionDeletedHook): () => void {
+    this.sessionDeletedListeners.add(hook);
+    return () => this.sessionDeletedListeners.delete(hook);
+  }
+
+  emitExternal(type: string, sessionId: string, payload: unknown): void {
+    this.emit(type, sessionId, payload);
   }
 
   private emit(type: string, sessionId: string, payload: unknown): void {
@@ -268,12 +345,98 @@ export class SessionManager {
     }
   }
 
+  private notifyTurnFinished(ev: TurnFinishedEvent): void {
+    for (const hook of this.turnFinishedListeners) {
+      try {
+        const res = hook(ev);
+        if (res && typeof (res as Promise<void>).catch === "function") {
+          (res as Promise<void>).catch(() => {
+            // ignore hook failure
+          });
+        }
+      } catch {
+        // ignore hook failure
+      }
+    }
+  }
+
+  private notifySessionDeleted(session: SessionSummary): void {
+    for (const hook of this.sessionDeletedListeners) {
+      try {
+        const res = hook(session);
+        if (res && typeof (res as Promise<void>).catch === "function") {
+          (res as Promise<void>).catch(() => {
+            // ignore hook failure
+          });
+        }
+      } catch {
+        // ignore hook failure
+      }
+    }
+  }
+
   private findAgent(agentId: string): AgentProfile {
     const found = this.agents.find((a) => a.id === agentId);
     if (!found) {
-      throw new Error(`Unknown agent: ${agentId}`);
+      const err = new Error(`Unknown agent: ${agentId}`) as Error & { statusCode?: number };
+      err.statusCode = 404;
+      throw err;
     }
     return found;
+  }
+
+  async probeAgentModels(agentId: string): Promise<{
+    agentId: string;
+    models: AcpModelInfo[];
+    defaultModelId: string | null;
+  }> {
+    const agent = this.findAgent(agentId);
+    const now = Date.now();
+
+    const fromDb = this.db.getLatestAgentModels(agent.id);
+    if (fromDb && fromDb.models.length > 0) {
+      this.modelProbeCache.set(agent.id, {
+        models: fromDb.models,
+        defaultModelId: fromDb.defaultModelId,
+        fetchedAt: now,
+      });
+      return {
+        agentId: agent.id,
+        models: fromDb.models,
+        defaultModelId: fromDb.defaultModelId,
+      };
+    }
+
+    const cached = this.modelProbeCache.get(agent.id);
+    if (cached && now - cached.fetchedAt < MODEL_PROBE_TTL_MS) {
+      return {
+        agentId: agent.id,
+        models: cached.models,
+        defaultModelId: cached.defaultModelId,
+      };
+    }
+
+    const client = new AcpClient(agent.command, agent.args, agent.env);
+    client.start(this.config.defaultCwd);
+    try {
+      await client.initialize();
+      const res = await client.newSession(this.config.defaultCwd);
+      const extracted = extractModels(res.models);
+      const defaultModelId =
+        extracted.currentModelId ?? extracted.availableModels[0]?.modelId ?? null;
+      this.modelProbeCache.set(agent.id, {
+        models: extracted.availableModels,
+        defaultModelId,
+        fetchedAt: Date.now(),
+      });
+      return {
+        agentId: agent.id,
+        models: extracted.availableModels,
+        defaultModelId,
+      };
+    } finally {
+      await client.dispose();
+    }
   }
 
   private refreshIdleTimer(entry: WorkerEntry): void {
@@ -341,6 +504,7 @@ export class SessionManager {
 
     const agent = this.findAgent(session.agentId);
     const cwd = fs.existsSync(session.cwd) ? session.cwd : this.config.defaultCwd;
+    const launchOptions = this.sessionLaunchHook?.(session, agent);
     const client = this.spawnClient(session.id, agent, cwd);
 
     try {
@@ -348,10 +512,11 @@ export class SessionManager {
 
       let acpSessionId = session.acpSessionId;
       let initRes: Record<string, unknown> | null = null;
+      let createdFresh = false;
 
       if (acpSessionId) {
         try {
-          initRes = await client.loadSession(acpSessionId, cwd);
+          initRes = await client.loadSession(acpSessionId, cwd, launchOptions);
         } catch {
           initRes = null;
           acpSessionId = null;
@@ -359,7 +524,8 @@ export class SessionManager {
       }
 
       if (!initRes || !acpSessionId) {
-        initRes = await client.newSession(cwd);
+        initRes = await client.newSession(cwd, launchOptions);
+        createdFresh = true;
         acpSessionId = String(initRes.sessionId || "");
         if (!acpSessionId) {
           throw new Error("ACP session/new did not return sessionId");
@@ -369,7 +535,24 @@ export class SessionManager {
 
       this.applySessionInitMetadata(session.id, initRes);
 
-      // Re-apply user's saved model/mode/config when re-hydrating a fresh fallback session
+      // Re-apply user's saved model when re-hydrating a fresh fallback session
+      if (createdFresh && session.currentModelId) {
+        const initModels = extractModels(initRes.models);
+        if (initModels.currentModelId !== session.currentModelId) {
+          try {
+            const setRes = await client.setModel(acpSessionId, session.currentModelId);
+            const patch: Parameters<RelayDatabase["updateSession"]>[1] = {
+              currentModelId: session.currentModelId,
+            };
+            const cfg = extractConfigOptions(setRes?.configOptions);
+            if (cfg.length > 0) patch.configOptions = cfg;
+            this.db.updateSession(session.id, patch);
+          } catch {
+            // ignore if model is no longer selectable
+          }
+        }
+      }
+
       const entry: WorkerEntry = {
         sessionId: session.id,
         acpSessionId,
@@ -381,7 +564,7 @@ export class SessionManager {
       this.refreshIdleTimer(entry);
       return entry;
     } catch (err) {
-      client.dispose();
+      await client.dispose();
       throw err;
     }
   }
@@ -390,6 +573,12 @@ export class SessionManager {
     agentId: string;
     cwd?: string;
     title?: string;
+    swarmId?: string | null;
+    swarmRole?: SwarmRole | null;
+    swarmMemberName?: string | null;
+    worktreeBranch?: string | null;
+    initialModelId?: string | null;
+    launchOptions?: AcpSessionLaunchOptions;
   }): Promise<SessionSummary> {
     const agent = this.findAgent(input.agentId);
     const cwd = (input.cwd || this.config.defaultCwd).trim() || this.config.defaultCwd;
@@ -402,7 +591,7 @@ export class SessionManager {
     const client = this.spawnClient(id, agent, cwd);
     try {
       await client.initialize();
-      const res = await client.newSession(cwd);
+      const res = await client.newSession(cwd, input.launchOptions);
       const acpSessionId = String(res.sessionId || "");
       if (!acpSessionId) {
         throw new Error("ACP session/new missing sessionId");
@@ -410,7 +599,25 @@ export class SessionManager {
 
       const models = extractModels(res.models);
       const modes = extractModes(res.modes);
-      const configOptions = extractConfigOptions(res.configOptions);
+      let configOptions = extractConfigOptions(res.configOptions);
+      let currentModelId = models.currentModelId;
+
+      if (
+        input.initialModelId &&
+        input.initialModelId.trim() &&
+        input.initialModelId !== currentModelId
+      ) {
+        try {
+          const setRes = await client.setModel(acpSessionId, input.initialModelId.trim());
+          currentModelId = input.initialModelId.trim();
+          const updatedCfg = extractConfigOptions(setRes?.configOptions);
+          if (updatedCfg.length > 0) {
+            configOptions = updatedCfg;
+          }
+        } catch {
+          // Keep agent default model if initialModelId is rejected
+        }
+      }
 
       const created = this.db.createSession({
         id,
@@ -418,12 +625,16 @@ export class SessionManager {
         acpSessionId,
         title,
         cwd,
-        currentModelId: models.currentModelId,
+        currentModelId,
         currentModeId: modes.currentModeId,
         availableModels: models.availableModels,
         availableModes: modes.availableModes,
         configOptions,
         availableCommands: [],
+        swarmId: input.swarmId ?? null,
+        swarmRole: input.swarmRole ?? null,
+        swarmMemberName: input.swarmMemberName ?? null,
+        worktreeBranch: input.worktreeBranch ?? null,
         now,
       });
 
@@ -443,12 +654,12 @@ export class SessionManager {
       this.emit("session_created", id, { session: latest });
       return latest;
     } catch (err) {
-      client.dispose();
+      await client.dispose();
       throw err;
     }
   }
 
-  deleteSession(sessionId: string): boolean {
+  async disposeSessionWorker(sessionId: string): Promise<void> {
     const turn = this.activeTurns.get(sessionId);
     if (turn) {
       turn.cancelled = true;
@@ -457,12 +668,30 @@ export class SessionManager {
     const worker = this.workers.get(sessionId);
     if (worker) {
       if (worker.idleTimer) clearTimeout(worker.idleTimer);
-      worker.client.dispose();
+      this.workers.delete(sessionId);
+      await worker.client.dispose();
+    }
+  }
+
+  deleteSession(sessionId: string, opts?: { skipDeletedHooks?: boolean }): boolean {
+    const existing = this.db.getSession(sessionId, this.getRunningSessionIds());
+    const turn = this.activeTurns.get(sessionId);
+    if (turn) {
+      turn.cancelled = true;
+      this.activeTurns.delete(sessionId);
+    }
+    const worker = this.workers.get(sessionId);
+    if (worker) {
+      if (worker.idleTimer) clearTimeout(worker.idleTimer);
+      void worker.client.dispose();
       this.workers.delete(sessionId);
     }
     const deleted = this.db.deleteSession(sessionId);
     if (deleted) {
       this.emit("session_deleted", sessionId, { sessionId });
+      if (!opts?.skipDeletedHooks && existing) {
+        this.notifySessionDeleted(existing);
+      }
     }
     return deleted;
   }
@@ -525,11 +754,18 @@ export class SessionManager {
 
   async startPrompt(
     sessionId: string,
-    input: { text: string; attachmentIds?: string[] }
+    input: {
+      text: string;
+      attachmentIds?: string[];
+      prefixSystemNote?: string;
+      source?: "user" | "swarm";
+    }
   ): Promise<{ userMessage: MessageRecord; assistantMessage: MessageRecord }> {
     const session = this.db.getSession(sessionId, this.getRunningSessionIds());
     if (!session) {
-      throw new Error("Session not found");
+      const err = new Error("Session not found") as Error & { statusCode?: number };
+      err.statusCode = 404;
+      throw err;
     }
     if (this.activeTurns.has(sessionId)) {
       const err = new Error("Session already has an active turn");
@@ -576,7 +812,15 @@ export class SessionManager {
     }
 
     const rawText = input.text.trim();
-    const combinedText = [rawText, ...fileNotes].filter(Boolean).join("\n\n");
+    const hookResult = this.beforePromptHook?.(session, {
+      text: rawText,
+      source: input.source ?? "user",
+    });
+    const prefixNote = [hookResult?.prefixSystemNote, input.prefixSystemNote]
+      .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+      .join("\n\n");
+
+    const combinedText = [prefixNote, rawText, ...fileNotes].filter(Boolean).join("\n\n");
     if (combinedText) {
       promptBlocks.unshift({ type: "text", text: combinedText });
     }
@@ -584,8 +828,8 @@ export class SessionManager {
       throw new Error("Prompt cannot be empty");
     }
 
-    // Auto-title session from first user message if still default
-    if (session.title === "新对话" && rawText) {
+    // Auto-title standalone session from first user message if still default
+    if (!session.swarmId && session.title === "新对话" && rawText) {
       const autoTitle = rawText.replace(/\s+/g, " ").slice(0, 28);
       this.db.updateSession(sessionId, { title: autoTitle });
     }
@@ -626,6 +870,7 @@ export class SessionManager {
       usage: null,
       seenUsageIds: new Set<string>(),
       cancelled: false,
+      userCancelled: false,
       lastFlushAt: Date.now(),
     };
     this.activeTurns.set(sessionId, turn);
@@ -652,6 +897,7 @@ export class SessionManager {
       this.refreshIdleTimer(worker);
 
       const stopReason = typeof res.stopReason === "string" ? res.stopReason : "end_turn";
+      if (this.disposed) return;
       const resUsage =
         res.usage && typeof res.usage === "object" ? (res.usage as UsageStats) : null;
       const usage = mergeUsageStats(resUsage, turn.usage);
@@ -678,8 +924,19 @@ export class SessionManager {
         session: latestSession,
       });
 
+      this.notifyTurnFinished({
+        sessionId: session.id,
+        session: latestSession,
+        assistantMessageId: turn.assistantMessageId,
+        content: turn.content,
+        thinking: turn.thinking,
+        status: finalStatus,
+        stopReason,
+        userCancelled: turn.userCancelled,
+      });
+
       const barkUrl = this.db.getSetting("bark_url");
-      if (barkUrl && finalStatus === "completed") {
+      if (barkUrl && finalStatus === "completed" && session.swarmRole !== "worker") {
         const preview = turn.content.replace(/\s+/g, " ").trim().slice(0, 90) || "任务已完成";
         void sendBarkNotification(
           barkUrl,
@@ -688,15 +945,17 @@ export class SessionManager {
         );
       }
     } catch (err) {
+      if (this.disposed) return;
       const errMsg = err instanceof Error ? err.message : String(err);
       const finalContent = turn.content
         ? `${turn.content}\n\n> 请求出错: ${errMsg}`
         : `请求出错: ${errMsg}`;
+      const finalStatus: MessageStatus = turn.cancelled ? "cancelled" : "error";
       this.db.updateMessage(turn.assistantMessageId, {
         content: finalContent,
         thinking: turn.thinking,
         toolCalls: turn.toolCalls,
-        status: turn.cancelled ? "cancelled" : "error",
+        status: finalStatus,
       });
       this.db.updateSession(session.id, { updatedAt: Date.now() });
       this.activeTurns.delete(session.id);
@@ -708,8 +967,20 @@ export class SessionManager {
         session: latestSession,
       });
 
+      this.notifyTurnFinished({
+        sessionId: session.id,
+        session: latestSession,
+        assistantMessageId: turn.assistantMessageId,
+        content: turn.content,
+        thinking: turn.thinking,
+        status: finalStatus,
+        stopReason: finalStatus,
+        error: errMsg,
+        userCancelled: turn.userCancelled,
+      });
+
       const barkUrl = this.db.getSetting("bark_url");
-      if (barkUrl && !turn.cancelled) {
+      if (barkUrl && !turn.cancelled && session.swarmRole !== "worker") {
         void sendBarkNotification(
           barkUrl,
           `Relay · ${latestSession?.title || "会话出错"}`,
@@ -723,6 +994,7 @@ export class SessionManager {
     const turn = this.activeTurns.get(sessionId);
     if (!turn) return false;
     turn.cancelled = true;
+    turn.userCancelled = true;
     const worker = this.workers.get(sessionId);
     if (worker?.client.isAlive) {
       worker.client.cancel(worker.acpSessionId);
@@ -879,7 +1151,11 @@ export class SessionManager {
         const title = typeof update.title === "string" ? update.title.trim() : "";
         if (title) {
           const existing = this.db.getSession(sessionId);
-          if (existing && (existing.title === "新对话" || existing.title.length <= 28)) {
+          if (
+            existing &&
+            !existing.swarmId &&
+            (existing.title === "新对话" || existing.title.length <= 28)
+          ) {
             this.db.updateSession(sessionId, { title: title.slice(0, 60) });
             const latest = this.db.getSession(sessionId, this.getRunningSessionIds());
             this.emit("session_updated", sessionId, { session: latest });
@@ -890,13 +1166,16 @@ export class SessionManager {
     }
   }
 
-  disposeAll(): void {
+  async disposeAll(): Promise<void> {
+    this.disposed = true;
+    const disposals: Promise<void>[] = [];
     for (const [, worker] of this.workers) {
       if (worker.idleTimer) clearTimeout(worker.idleTimer);
-      worker.client.dispose();
+      disposals.push(worker.client.dispose());
     }
     this.workers.clear();
     this.activeTurns.clear();
+    await Promise.all(disposals);
   }
 }
 

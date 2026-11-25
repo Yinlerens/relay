@@ -29,18 +29,23 @@ final class AppStore {
     // MARK: Server state
     var agents: [AgentInfo] = []
     var sessions: [SessionSummary] = []
+    var swarms: [SwarmSummary] = []
     var defaultCwd: String = ""
     var barkUrl: String = ""
     var hasBootstrapped = false
     var messages: [String: [Message]] = [:]
+    var swarmBoardMessages: [String: [SwarmBoardMessage]] = [:]
 
     // MARK: UI state
     var socketState: RelaySocket.State = .idle
     var loadingSessions: Set<String> = []
+    var loadingSwarms: Set<String> = []
     var creatingAgentIds: Set<String> = []
+    var creatingSwarm = false
     var pendingConfigKeys: Set<String> = []
     var banner: Banner? = nil
     var activeSessionId: String? = nil
+    var pendingOpenSessionId: String? = nil
 
     // MARK: Quotas & credits
     var quotas: QuotaOverview? = nil
@@ -102,6 +107,34 @@ final class AppStore {
         messages[sessionId] ?? []
     }
 
+    var topLevelSessions: [SessionSummary] {
+        sessions.filter { !$0.isSwarmWorker }
+    }
+
+    func swarm(id: String) -> SwarmSummary? {
+        swarms.first(where: { $0.id == id })
+    }
+
+    func swarm(forSessionId sessionId: String) -> SwarmSummary? {
+        if let direct = swarms.first(where: {
+            $0.coordinatorSessionId == sessionId || $0.members.contains(where: { $0.sessionId == sessionId })
+        }) {
+            return direct
+        }
+        if let sid = session(sessionId)?.swarmId {
+            return swarm(id: sid)
+        }
+        return nil
+    }
+
+    func boardMessages(for swarmId: String) -> [SwarmBoardMessage] {
+        swarmBoardMessages[swarmId] ?? []
+    }
+
+    func requestOpenSession(_ sessionId: String) {
+        pendingOpenSessionId = sessionId
+    }
+
     func configKey(_ sessionId: String, _ kind: ConfigKind, _ configId: String?) -> String {
         "\(sessionId)|\(kind.rawValue)|\(configId ?? "")"
     }
@@ -134,6 +167,9 @@ final class AppStore {
         await refresh()
         if let active = activeSessionId {
             await reloadMessages(active)
+            if let sw = swarm(forSessionId: active) {
+                await loadSwarm(sw.id)
+            }
         }
     }
 
@@ -148,11 +184,14 @@ final class AppStore {
     private func apply(_ boot: BootstrapResponse) {
         agents = boot.agents
         sessions = boot.sessions.sorted { $0.updatedAt > $1.updatedAt }
+        swarms = boot.swarms.sorted { $0.updatedAt > $1.updatedAt }
         defaultCwd = boot.defaultCwd
         barkUrl = boot.settings.barkUrl
         hasBootstrapped = true
         let known = Set(sessions.map(\.id))
         messages = messages.filter { known.contains($0.key) }
+        let knownSwarms = Set(swarms.map(\.id))
+        swarmBoardMessages = swarmBoardMessages.filter { knownSwarms.contains($0.key) }
     }
 
     // MARK: - Pairing
@@ -177,6 +216,8 @@ final class AppStore {
             serverURLString = url.absoluteString
             token = cleanToken
             messages = [:]
+            swarmBoardMessages = [:]
+            pendingOpenSessionId = nil
             apply(boot)
             withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
                 isPaired = true
@@ -200,10 +241,15 @@ final class AppStore {
         withAnimation(.spring(response: 0.5, dampingFraction: 0.9)) {
             isPaired = false
             sessions = []
+            swarms = []
             agents = []
             messages = [:]
+            swarmBoardMessages = [:]
             hasBootstrapped = false
             activeSessionId = nil
+            pendingOpenSessionId = nil
+            creatingSwarm = false
+            loadingSwarms = []
             quotas = nil
             quotaError = nil
         }
@@ -337,6 +383,162 @@ final class AppStore {
     func fetchWorkspaces() async -> [String] {
         guard let api else { return [] }
         return (try? await api.workspaces()) ?? []
+    }
+
+    // MARK: - Swarms
+
+    func fetchAgentModels(agentId: String) async -> AgentModelsResponse? {
+        guard let api else { return nil }
+        return try? await api.agentModels(agentId: agentId)
+    }
+
+    func createSwarm(
+        title: String? = nil,
+        cwd: String? = nil,
+        coordinatorAgentId: String? = nil,
+        coordinatorModelId: String? = nil,
+        defaultWorkerAgentId: String? = nil,
+        defaultWorkerModelId: String? = nil
+    ) async -> CreateSwarmResponse? {
+        guard let api, !creatingSwarm else { return nil }
+        creatingSwarm = true
+        defer { creatingSwarm = false }
+        do {
+            let created = try await api.createSwarm(
+                title: title,
+                cwd: cwd,
+                coordinatorAgentId: coordinatorAgentId,
+                coordinatorModelId: coordinatorModelId,
+                defaultWorkerAgentId: defaultWorkerAgentId,
+                defaultWorkerModelId: defaultWorkerModelId
+            )
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+                upsertSwarm(created.swarm)
+                upsertSession(created.session)
+            }
+            if messages[created.session.id] == nil { messages[created.session.id] = [] }
+            if swarmBoardMessages[created.swarm.id] == nil { swarmBoardMessages[created.swarm.id] = [] }
+            Haptics.success()
+            return created
+        } catch {
+            Haptics.error()
+            showBanner("启动蜂群失败：\(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    func loadSwarm(_ id: String) async {
+        guard let api else { return }
+        loadingSwarms.insert(id)
+        defer { loadingSwarms.remove(id) }
+        do {
+            let detail = try await api.swarmDetail(id: id)
+            upsertSwarm(detail.swarm)
+            swarmBoardMessages[id] = detail.messages.sorted { $0.seq < $1.seq }
+        } catch {
+            if let apiError = error as? RelayAPIError, case .server(let status, _) = apiError, status == 404 {
+                removeSwarmLocally(id)
+            } else if swarm(id: id) == nil {
+                showBanner(error.localizedDescription)
+            }
+        }
+    }
+
+    @discardableResult
+    func addSwarmWorker(
+        swarmId: String,
+        name: String,
+        brief: String,
+        agentId: String? = nil,
+        modelId: String? = nil,
+        workspace: String = "inherit"
+    ) async -> SwarmMember? {
+        guard let api else { return nil }
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let cleanBrief = brief.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty, !cleanBrief.isEmpty else { return nil }
+        do {
+            let res = try await api.addSwarmWorker(
+                swarmId: swarmId,
+                name: cleanName,
+                brief: cleanBrief,
+                agentId: agentId,
+                modelId: modelId,
+                workspace: workspace
+            )
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.86)) {
+                upsertSwarm(res.swarm)
+            }
+            Task { await self.loadSwarm(swarmId) }
+            Haptics.success()
+            showBanner("已派发工人 @\(res.member.name)", isError: false)
+            return res.member
+        } catch {
+            Haptics.error()
+            showBanner("添加工人失败：\(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    @discardableResult
+    func postSwarmBoard(swarmId: String, text: String) async -> Bool {
+        guard let api else { return false }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        do {
+            let res = try await api.postSwarmBoard(swarmId: swarmId, text: trimmed)
+            withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
+                upsertSwarm(res.swarm)
+                insertBoardMessage(res.message, swarmId: swarmId)
+            }
+            Haptics.tap(.soft)
+            return true
+        } catch {
+            Haptics.error()
+            showBanner("发帖失败：\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    func killSwarmWorker(swarmId: String, name: String, removeWorktree: Bool = true) async -> Bool {
+        guard let api else { return false }
+        do {
+            let updated = try await api.killSwarmWorker(swarmId: swarmId, name: name, removeWorktree: removeWorktree)
+            withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) {
+                upsertSwarm(updated)
+            }
+            Haptics.tap(.medium)
+            showBanner("已终止工人 @\(name)", isError: false)
+            return true
+        } catch {
+            Haptics.error()
+            showBanner("终止工人失败：\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    func deleteSwarm(_ id: String) async {
+        guard let api else { return }
+        let swarmSnapshot = swarm(id: id)
+        let sessionSnapshots = sessions.filter { $0.swarmId == id || $0.id == swarmSnapshot?.coordinatorSessionId }
+        let removedIds = Set(sessionSnapshots.map(\.id))
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.9)) {
+            swarms.removeAll { $0.id == id }
+            sessions.removeAll { removedIds.contains($0.id) }
+        }
+        swarmBoardMessages[id] = nil
+        for sid in removedIds { messages[sid] = nil }
+        Haptics.tap(.medium)
+        do {
+            try await api.deleteSwarm(id: id)
+        } catch {
+            withAnimation {
+                if let swarmSnapshot { upsertSwarm(swarmSnapshot) }
+                for s in sessionSnapshots { upsertSession(s) }
+            }
+            showBanner("删除蜂群失败：\(error.localizedDescription)")
+        }
     }
 
     // MARK: - Quotas
@@ -498,6 +700,37 @@ final class AppStore {
         messages[id] = nil
     }
 
+    private func upsertSwarm(_ s: SwarmSummary) {
+        if let idx = swarms.firstIndex(where: { $0.id == s.id }) {
+            swarms[idx] = s
+        } else {
+            swarms.append(s)
+        }
+        swarms.sort { $0.updatedAt > $1.updatedAt }
+    }
+
+    private func removeSwarmLocally(_ id: String) {
+        let coordId = swarm(id: id)?.coordinatorSessionId
+        let removedIds = Set(sessions.filter { $0.swarmId == id || (coordId != nil && $0.id == coordId) }.map(\.id))
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.9)) {
+            swarms.removeAll { $0.id == id }
+            sessions.removeAll { removedIds.contains($0.id) }
+        }
+        swarmBoardMessages[id] = nil
+        for sid in removedIds { messages[sid] = nil }
+    }
+
+    private func insertBoardMessage(_ message: SwarmBoardMessage, swarmId: String) {
+        var list = swarmBoardMessages[swarmId] ?? []
+        if let idx = list.firstIndex(where: { $0.seq == message.seq || ($0.id != 0 && $0.id == message.id) }) {
+            list[idx] = message
+        } else {
+            list.append(message)
+        }
+        list.sort { $0.seq < $1.seq }
+        swarmBoardMessages[swarmId] = list
+    }
+
     private func setRunning(_ sessionId: String, _ running: Bool) {
         guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
         if sessions[idx].isRunning != running {
@@ -627,6 +860,36 @@ final class AppStore {
             if activeSessionId == sid { Haptics.error() }
             if messages[sid] != nil {
                 Task { await self.reloadMessages(sid) }
+            }
+
+        case "swarm_created":
+            if let sw = decodePayload(WSSwarmPayload.self, from: data)?.swarm {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+                    upsertSwarm(sw)
+                }
+            }
+
+        case "swarm_updated":
+            if let sw = decodePayload(WSSwarmPayload.self, from: data)?.swarm {
+                upsertSwarm(sw)
+            }
+
+        case "swarm_deleted":
+            if let target = decodePayload(WSSwarmDeletedPayload.self, from: data)?.swarmId {
+                removeSwarmLocally(target)
+            }
+
+        case "swarm_board_post":
+            if let p = decodePayload(WSSwarmBoardPostPayload.self, from: data) {
+                if let sw = p.swarm { upsertSwarm(sw) }
+                if let msg = p.message {
+                    let targetId = p.swarmId ?? msg.swarmId
+                    if !targetId.isEmpty {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+                            insertBoardMessage(msg, swarmId: targetId)
+                        }
+                    }
+                }
             }
 
         default:

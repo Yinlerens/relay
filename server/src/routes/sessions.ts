@@ -5,12 +5,14 @@ import type { ConfigValue } from "../acp/types.js";
 import type { SessionManager } from "../acp/manager.js";
 import type { AppConfig } from "../config.js";
 import type { RelayDatabase } from "../db.js";
+import type { SwarmManager } from "../swarm/manager.js";
 
 export function registerSessionRoutes(
   app: FastifyInstance,
   config: AppConfig,
   db: RelayDatabase,
-  manager: SessionManager
+  manager: SessionManager,
+  swarmManager?: SwarmManager
 ): void {
   app.get("/api/bootstrap", async () => {
     const running = manager.getRunningSessionIds();
@@ -23,6 +25,7 @@ export function registerSessionRoutes(
         accent,
       })),
       sessions: db.listSessions(running),
+      swarms: db.listSwarms(running),
       defaultCwd: config.defaultCwd,
       settings: {
         barkUrl: db.getSetting("bark_url") || "",
@@ -39,6 +42,13 @@ export function registerSessionRoutes(
       accent,
     })),
   }));
+
+  app.get<{ Params: { id: string } }>("/api/agents/:id/models", async (req, reply) => {
+    if (!manager.hasAgent(req.params.id)) {
+      return reply.code(404).send({ error: `Unknown agent: ${req.params.id}` });
+    }
+    return manager.probeAgentModels(req.params.id);
+  });
 
   app.get("/api/workspaces", async () => {
     const candidates = new Set<string>([config.defaultCwd]);
@@ -94,8 +104,16 @@ export function registerSessionRoutes(
       if (!title) {
         return reply.code(400).send({ error: "title is required" });
       }
-      db.updateSession(session.id, { title: title.slice(0, 80) });
+      const cleanTitle = title.slice(0, 80);
+      if (session.swarmRole === "coordinator" && session.swarmId && swarmManager) {
+        swarmManager.updateSwarm(session.swarmId, { title: cleanTitle });
+      } else {
+        db.updateSession(session.id, { title: cleanTitle });
+      }
       const updated = db.getSession(session.id, manager.getRunningSessionIds());
+      if (updated) {
+        manager.emitExternal("session_updated", session.id, { session: updated });
+      }
       return { session: updated };
     }
   );

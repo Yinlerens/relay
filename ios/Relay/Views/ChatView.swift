@@ -17,6 +17,7 @@ struct ChatView: View {
     @State private var showConfig = false
     @State private var showContextInfo = false
     @State private var showQuota = false
+    @State private var showSwarm = false
     @State private var isAtBottom = true
     @State private var viewportHeight: CGFloat = 0
     @State private var lightbox: Attachment?
@@ -25,6 +26,7 @@ struct ChatView: View {
 
     var body: some View {
         let session = store.session(sessionId)
+        let swarm = store.swarm(forSessionId: sessionId)
         let style = store.style(for: session?.agentId ?? "")
         let agentName = session.flatMap { store.agent(for: $0.agentId)?.name } ?? session?.agentId ?? "Agent"
         let messages = store.messages(for: sessionId)
@@ -42,7 +44,7 @@ struct ChatView: View {
                         }
                         .padding(.top, 80)
                     } else if messages.isEmpty, let session {
-                        ChatEmptyState(session: session, agentName: agentName, style: style) { suggestion in
+                        ChatEmptyState(session: session, swarm: swarm, agentName: agentName, style: style) { suggestion in
                             draft = suggestion
                         }
                         .padding(.top, 40)
@@ -123,6 +125,20 @@ struct ChatView: View {
                     .transition(.scale(scale: 0.8).combined(with: .opacity))
                 }
             }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if let swarm, let session {
+                    SwarmBarView(
+                        swarm: swarm,
+                        currentSession: session,
+                        onOpenOverview: {
+                            showSwarm = true
+                        },
+                        onSelectSession: { targetId in
+                            store.requestOpenSession(targetId)
+                        }
+                    )
+                }
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 ComposerView(sessionId: sessionId, style: style, agentName: agentName, text: $draft)
             }
@@ -158,6 +174,18 @@ struct ChatView: View {
                 .accessibilityHint("打开模型与模式设置")
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
+                if let swarm {
+                    Button {
+                        showSwarm = true
+                        Haptics.tap()
+                    } label: {
+                        Image(systemName: SwarmTheme.style.symbol)
+                            .foregroundStyle(swarm.isAnyRunning ? SwarmTheme.style.tint : Palette.textPrimary)
+                            .symbolEffect(.pulse, options: .repeating, isActive: swarm.isAnyRunning)
+                    }
+                    .accessibilityLabel("蜂群总览")
+                }
+
                 Button {
                     showContextInfo = true
                     Haptics.tap()
@@ -194,9 +222,19 @@ struct ChatView: View {
         .sheet(isPresented: $showQuota) {
             QuotaSheet(focusAgent: session?.agentId)
         }
+        .sheet(isPresented: $showSwarm) {
+            if let sw = store.swarm(forSessionId: sessionId) {
+                SwarmSheet(swarmId: sw.id, currentSessionId: sessionId)
+            }
+        }
         .task(id: sessionId) {
             store.activeSessionId = sessionId
             await store.loadSession(sessionId)
+        }
+        .task(id: swarm?.id ?? session?.swarmId) {
+            if let swId = swarm?.id ?? session?.swarmId {
+                await store.loadSwarm(swId)
+            }
         }
         .onDisappear {
             if store.activeSessionId == sessionId {
@@ -336,30 +374,54 @@ struct ContextInfoView: View {
 
 struct ChatEmptyState: View {
     var session: SessionSummary
+    var swarm: SwarmSummary? = nil
     var agentName: String
     var style: AgentStyle
     var onSuggestion: (String) -> Void
+
+    @Environment(AppStore.self) private var store
 
     private struct Suggestion: Hashable {
         let icon: String
         let text: String
     }
 
-    private let suggestions: [Suggestion] = [
+    private let normalSuggestions: [Suggestion] = [
         Suggestion(icon: "doc.text.magnifyingglass", text: "梳理一下当前项目的结构"),
         Suggestion(icon: "checklist", text: "帮我列一个今天的待办计划"),
         Suggestion(icon: "ladybug", text: "检查最近的报错并修复"),
     ]
 
+    private let swarmSuggestions: [Suggestion] = [
+        Suggestion(icon: "square.split.2x2", text: "拆解需求并分配前端与后端工人并行实现"),
+        Suggestion(icon: "magnifyingglass.circle", text: "派两个工人分别排查性能瓶颈与测试覆盖率"),
+        Suggestion(icon: "doc.text.magnifyingglass", text: "先调研代码库架构，再给出分工与验收方案"),
+    ]
+
+    private var isSwarmCoordinator: Bool {
+        session.isSwarmCoordinator || (swarm != nil && swarm?.coordinatorSessionId == session.id)
+    }
+
+    private var suggestions: [Suggestion] {
+        isSwarmCoordinator ? swarmSuggestions : normalSuggestions
+    }
+
+    private var accentStyle: AgentStyle {
+        isSwarmCoordinator ? SwarmTheme.style : style
+    }
+
     var body: some View {
         VStack(spacing: 22) {
-            AgentGlyph(style: style, size: 64)
+            AgentGlyph(style: accentStyle, size: 64)
             VStack(spacing: 8) {
-                Text("与 \(agentName) 对话")
+                Text(isSwarmCoordinator ? "蜂群总控已就绪" : "与 \(agentName) 对话")
                     .font(RelayFont.display(26))
                     .foregroundStyle(Palette.textPrimary)
                 HStack(spacing: 6) {
-                    if let model = session.currentModelName {
+                    if isSwarmCoordinator, let swarm {
+                        let workerName = store.agent(for: swarm.defaultWorkerAgentId)?.name ?? swarm.defaultWorkerAgentId
+                        Text("\(agentName) 统筹 · \(workerName) 协作")
+                    } else if let model = session.currentModelName {
                         Text(model)
                     }
                     if !session.cwd.isEmpty {
@@ -370,6 +432,15 @@ struct ChatEmptyState: View {
                 }
                 .font(.system(size: 13))
                 .foregroundStyle(Palette.textSecondary)
+
+                if isSwarmCoordinator {
+                    Text("直接描述目标，总控会自动拆解任务、拉起工人与独立 Worktree，并在留言板实时协同。")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Palette.textTertiary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 12)
+                        .padding(.top, 2)
+                }
             }
 
             VStack(spacing: 10) {
@@ -381,18 +452,20 @@ struct ChatEmptyState: View {
                         HStack(spacing: 12) {
                             Image(systemName: item.icon)
                                 .font(.system(size: 15, weight: .medium))
-                                .foregroundStyle(style.tint)
+                                .foregroundStyle(accentStyle.tint)
                                 .frame(width: 22)
                             Text(item.text)
                                 .font(.system(size: 14.5, weight: .medium))
                                 .foregroundStyle(Palette.textPrimary)
+                                .multilineTextAlignment(.leading)
                             Spacer()
                             Image(systemName: "arrow.up.left")
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(Palette.textTertiary)
                         }
                         .padding(.horizontal, 16)
-                        .frame(height: 50)
+                        .frame(minHeight: 50)
+                        .padding(.vertical, 6)
                         .cardSurface(radius: 16)
                     }
                     .buttonStyle(.pressable)

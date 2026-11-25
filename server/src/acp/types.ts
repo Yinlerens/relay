@@ -60,6 +60,77 @@ export interface UsageStats {
   originalCredits?: number;
 }
 
+export interface AcpMcpServerHeader {
+  name: string;
+  value: string;
+}
+
+export interface AcpMcpServerConfig {
+  type: "http";
+  name: string;
+  url: string;
+  headers: AcpMcpServerHeader[];
+}
+
+export interface AcpSessionLaunchOptions {
+  mcpServers?: AcpMcpServerConfig[];
+  meta?: Record<string, unknown>;
+}
+
+export type SwarmRole = "coordinator" | "worker";
+export type SwarmMemberState = "waiting" | "working" | "done" | "error" | "killed";
+export type SwarmWorkspaceMode = "inherit" | "worktree";
+export type SwarmBoardMessageKind = "brief" | "post" | "done" | "status" | "system";
+export type SwarmStatus = "active" | "completed" | "archived";
+
+export interface SwarmMember {
+  swarmId: string;
+  name: string;
+  role: SwarmRole;
+  sessionId: string;
+  agentId: string;
+  modelId: string | null;
+  state: SwarmMemberState;
+  workspaceMode: SwarmWorkspaceMode;
+  worktreePath: string | null;
+  worktreeBranch: string | null;
+  brief: string;
+  totalCredits: number;
+  isRunning: boolean;
+  lastReadSeq: number;
+  lastPostSeq: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SwarmBoardMessage {
+  id: number;
+  swarmId: string;
+  seq: number;
+  sender: string;
+  mentions: string[];
+  text: string;
+  kind: SwarmBoardMessageKind;
+  createdAt: number;
+}
+
+export interface SwarmSummary {
+  id: string;
+  title: string;
+  cwd: string;
+  coordinatorSessionId: string;
+  coordinatorAgentId: string;
+  defaultWorkerAgentId: string;
+  defaultWorkerModelId: string | null;
+  status: SwarmStatus;
+  headSeq: number;
+  totalCredits: number;
+  activeWorkerCount: number;
+  members: SwarmMember[];
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface JsonRpcResponse {
   jsonrpc: "2.0";
   id: string | number;

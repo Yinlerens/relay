@@ -230,6 +230,88 @@ struct RelayAPI: Sendable {
         )
     }
 
+    // MARK: Swarm endpoints
+
+    func agentModels(agentId: String) async throws -> AgentModelsResponse {
+        var request = authorizedRequest("/api/agents/\(agentId)/models")
+        request.timeoutInterval = 45
+        return try await send(request, as: AgentModelsResponse.self)
+    }
+
+    func swarms() async throws -> [SwarmSummary] {
+        try await json("/api/swarms", as: SwarmListResponse.self).swarms
+    }
+
+    func createSwarm(
+        title: String? = nil,
+        cwd: String? = nil,
+        coordinatorAgentId: String? = nil,
+        coordinatorModelId: String? = nil,
+        defaultWorkerAgentId: String? = nil,
+        defaultWorkerModelId: String? = nil
+    ) async throws -> CreateSwarmResponse {
+        var body: [String: Any] = [:]
+        if let title, !title.isEmpty { body["title"] = title }
+        if let cwd, !cwd.isEmpty { body["cwd"] = cwd }
+        if let coordinatorAgentId, !coordinatorAgentId.isEmpty { body["coordinatorAgentId"] = coordinatorAgentId }
+        if let coordinatorModelId, !coordinatorModelId.isEmpty { body["coordinatorModelId"] = coordinatorModelId }
+        if let defaultWorkerAgentId, !defaultWorkerAgentId.isEmpty { body["defaultWorkerAgentId"] = defaultWorkerAgentId }
+        if let defaultWorkerModelId, !defaultWorkerModelId.isEmpty { body["defaultWorkerModelId"] = defaultWorkerModelId }
+        var request = authorizedRequest("/api/swarms", method: "POST")
+        request.timeoutInterval = 120
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await send(request, as: CreateSwarmResponse.self)
+    }
+
+    func swarmDetail(id: String) async throws -> SwarmDetailResponse {
+        try await json("/api/swarms/\(id)", as: SwarmDetailResponse.self)
+    }
+
+    func addSwarmWorker(
+        swarmId: String,
+        name: String,
+        brief: String,
+        agentId: String? = nil,
+        modelId: String? = nil,
+        workspace: String = "inherit"
+    ) async throws -> SwarmWorkerCreatedResponse {
+        var body: [String: Any] = [
+            "name": name,
+            "brief": brief,
+            "workspace": workspace,
+        ]
+        if let agentId, !agentId.isEmpty { body["agentId"] = agentId }
+        if let modelId, !modelId.isEmpty { body["modelId"] = modelId }
+        var request = authorizedRequest("/api/swarms/\(swarmId)/workers", method: "POST")
+        request.timeoutInterval = 120
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await send(request, as: SwarmWorkerCreatedResponse.self)
+    }
+
+    func postSwarmBoard(swarmId: String, text: String) async throws -> SwarmBoardPostResponse {
+        try await json(
+            "/api/swarms/\(swarmId)/board",
+            method: "POST",
+            body: ["text": text],
+            as: SwarmBoardPostResponse.self
+        )
+    }
+
+    func killSwarmWorker(swarmId: String, name: String, removeWorktree: Bool = true) async throws -> SwarmSummary {
+        try await json(
+            "/api/swarms/\(swarmId)/workers/\(name)/kill",
+            method: "POST",
+            body: ["removeWorktree": removeWorktree],
+            as: SwarmEnvelopeResponse.self
+        ).swarm
+    }
+
+    func deleteSwarm(id: String) async throws {
+        _ = try await json("/api/swarms/\(id)", method: "DELETE", as: OkResponse.self)
+    }
+
     /// `ws(s)://host/ws` request with Bearer auth header for `URLSessionWebSocketTask`.
     func webSocketRequest() -> URLRequest? {
         guard var components = URLComponents(url: url("/ws"), resolvingAgainstBaseURL: false) else { return nil }

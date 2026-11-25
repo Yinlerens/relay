@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import type {
+  AcpSessionLaunchOptions,
   ConfigValue,
   JsonRpcNotification,
   JsonRpcRequest,
@@ -258,20 +259,34 @@ export class AcpClient {
     );
   }
 
-  async newSession(cwd: string): Promise<Record<string, unknown>> {
-    return this.request<Record<string, unknown>>(
-      "session/new",
-      { cwd, mcpServers: [] },
-      30_000
-    );
+  async newSession(
+    cwd: string,
+    options?: AcpSessionLaunchOptions
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = {
+      cwd,
+      mcpServers: options?.mcpServers ?? [],
+    };
+    if (options?.meta && Object.keys(options.meta).length > 0) {
+      params._meta = options.meta;
+    }
+    return this.request<Record<string, unknown>>("session/new", params, 30_000);
   }
 
-  async loadSession(sessionId: string, cwd: string): Promise<Record<string, unknown>> {
-    return this.request<Record<string, unknown>>(
-      "session/load",
-      { sessionId, cwd, mcpServers: [] },
-      30_000
-    );
+  async loadSession(
+    sessionId: string,
+    cwd: string,
+    options?: AcpSessionLaunchOptions
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = {
+      sessionId,
+      cwd,
+      mcpServers: options?.mcpServers ?? [],
+    };
+    if (options?.meta && Object.keys(options.meta).length > 0) {
+      params._meta = options.meta;
+    }
+    return this.request<Record<string, unknown>>("session/load", params, 30_000);
   }
 
   async prompt(
