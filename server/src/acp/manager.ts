@@ -8,6 +8,7 @@ import type {
   SessionSummary,
 } from "../db.js";
 import { sendBarkNotification } from "../utils/bark.js";
+import { cleanupUploadsByIds } from "../utils/uploads-cleanup.js";
 import { AcpClient } from "./client.js";
 import type {
   AcpConfigOption,
@@ -678,6 +679,7 @@ export class SessionManager {
 
   deleteSession(sessionId: string, opts?: { skipDeletedHooks?: boolean }): boolean {
     const existing = this.db.getSession(sessionId, this.getRunningSessionIds());
+    const candidateUploadIds = this.db.listSessionAttachmentIds(sessionId);
     const turn = this.activeTurns.get(sessionId);
     if (turn) {
       turn.cancelled = true;
@@ -692,6 +694,9 @@ export class SessionManager {
     }
     const deleted = this.db.deleteSession(sessionId);
     if (deleted) {
+      if (candidateUploadIds.length > 0) {
+        cleanupUploadsByIds(this.db, candidateUploadIds);
+      }
       this.emit("session_deleted", sessionId, { sessionId });
       if (!opts?.skipDeletedHooks && existing) {
         this.notifySessionDeleted(existing);
@@ -1120,6 +1125,10 @@ export class SessionManager {
         const cleanTitle = rawTitle.replace(/^`|`$/g, "").slice(0, 120);
         const toolKind = typeof update.kind === "string" ? update.kind : "other";
         const status = typeof update.status === "string" ? update.status : "";
+        const inputPreview = summarizeToolPayload(update.rawInput);
+        const outputPreview =
+          summarizeToolPayload(update.rawOutput) ?? extractToolContentText(update.content);
+        const locations = extractToolLocations(update.locations);
 
         const idx = turn.toolCalls.findIndex((t) => t.id === toolCallId);
         if (idx === -1) {
@@ -1132,15 +1141,24 @@ export class SessionManager {
             title: cleanTitle || name,
             kind: toolKind,
             status: status || "in_progress",
+            ...(inputPreview ? { inputPreview } : {}),
+            ...(outputPreview ? { outputPreview } : {}),
+            ...(locations ? { locations } : {}),
           });
         } else {
           const prev = turn.toolCalls[idx];
+          const nextInput = inputPreview || prev.inputPreview;
+          const nextOutput = outputPreview || prev.outputPreview;
+          const nextLocations = locations || prev.locations;
           turn.toolCalls[idx] = {
             id: toolCallId,
             name: name !== "tool" ? name : prev.name,
             title: cleanTitle || prev.title,
             kind: toolKind !== "other" ? toolKind : prev.kind,
             status: status || prev.status,
+            ...(nextInput ? { inputPreview: nextInput } : {}),
+            ...(nextOutput ? { outputPreview: nextOutput } : {}),
+            ...(nextLocations ? { locations: nextLocations } : {}),
           };
         }
 
@@ -1243,4 +1261,74 @@ function extractChunkText(content: unknown): string {
     return obj.text;
   }
   return "";
+}
+
+const ANSI_ESCAPE_REGEX = /\u001B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
+
+function truncateText(raw: string, maxLen: number): string {
+  const clean = raw.replace(ANSI_ESCAPE_REGEX, "").trim();
+  if (!clean) return "";
+  if (clean.length <= maxLen) return clean;
+  return `${clean.slice(0, Math.max(0, maxLen - 1))}…`;
+}
+
+export function summarizeToolPayload(raw: unknown, maxLen = 1200): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw === "string") {
+    const s = truncateText(raw, maxLen);
+    return s || undefined;
+  }
+  if (typeof raw === "number" || typeof raw === "boolean") {
+    return String(raw);
+  }
+  try {
+    const serialized = JSON.stringify(raw, null, 2);
+    if (!serialized || serialized === "{}" || serialized === "[]") return undefined;
+    const s = truncateText(serialized, maxLen);
+    return s || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function extractToolContentText(content: unknown, maxLen = 1200): string | undefined {
+  if (!Array.isArray(content) || content.length === 0) return undefined;
+  const parts: string[] = [];
+  for (const item of content) {
+    if (!item || typeof item !== "object") continue;
+    const block = item as Record<string, unknown>;
+    if (block.type === "content" && block.content && typeof block.content === "object") {
+      const inner = block.content as Record<string, unknown>;
+      if (inner.type === "text" && typeof inner.text === "string" && inner.text.trim()) {
+        parts.push(inner.text.trim());
+      }
+    } else if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
+      parts.push(block.text.trim());
+    } else if (block.type === "diff" && typeof block.path === "string") {
+      const oldLen = typeof block.oldText === "string" ? block.oldText.split("\n").length : 0;
+      const newLen = typeof block.newText === "string" ? block.newText.split("\n").length : 0;
+      parts.push(`[diff] ${block.path} (-${oldLen}/+${newLen})`);
+    } else if (block.type === "terminal" && typeof block.terminalId === "string") {
+      parts.push(`[terminal:${block.terminalId}]`);
+    }
+  }
+  if (parts.length === 0) return undefined;
+  const combined = truncateText(parts.join("\n\n"), maxLen);
+  return combined || undefined;
+}
+
+export function extractToolLocations(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const out: string[] = [];
+  for (const item of raw) {
+    if (out.length >= 8) break;
+    if (!item || typeof item !== "object") continue;
+    const obj = item as Record<string, unknown>;
+    const filePath = typeof obj.path === "string" ? obj.path.trim() : "";
+    if (!filePath) continue;
+    const line = typeof obj.line === "number" && Number.isFinite(obj.line) ? Math.trunc(obj.line) : null;
+    const loc = line && line > 0 ? `${filePath}:${line}` : filePath;
+    if (!out.includes(loc)) out.push(loc);
+  }
+  return out.length > 0 ? out : undefined;
 }

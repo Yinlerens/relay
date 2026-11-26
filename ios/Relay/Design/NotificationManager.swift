@@ -2,10 +2,26 @@ import Foundation
 import UIKit
 @preconcurrency import UserNotifications
 
-/// Native iOS local notifications for generation/Agent errors (lock-screen/background delivery + test trigger).
+/// Native iOS local notifications for generation/Agent errors with tap deep-linking.
 @MainActor
 final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
+    struct NotificationTarget: Equatable, Sendable {
+        let sessionId: String?
+        let tavernCharacterId: Int?
+    }
+
     static let shared = NotificationManager()
+
+    var onSelectTarget: (@MainActor (NotificationTarget) -> Void)? {
+        didSet {
+            if let target = pendingTarget, let handler = onSelectTarget {
+                pendingTarget = nil
+                handler(target)
+            }
+        }
+    }
+
+    private var pendingTarget: NotificationTarget?
 
     var isEnabled: Bool {
         get { UserDefaults.standard.object(forKey: SettingsKey.errorNotifications) as? Bool ?? true }
@@ -40,7 +56,9 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         title: String,
         body: String,
         identifier: String = UUID().uuidString,
-        forceInForeground: Bool = false
+        forceInForeground: Bool = false,
+        sessionId: String? = nil,
+        tavernCharacterId: Int? = nil
     ) {
         guard forceInForeground || isEnabled else { return }
         if !forceInForeground && UIApplication.shared.applicationState == .active {
@@ -62,6 +80,17 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
             content.sound = .default
             content.interruptionLevel = .active
 
+            var userInfo: [AnyHashable: Any] = [:]
+            if let sessionId, !sessionId.isEmpty {
+                userInfo["sessionId"] = sessionId
+            }
+            if let tavernCharacterId {
+                userInfo["tavernCharacterId"] = tavernCharacterId
+            }
+            if !userInfo.isEmpty {
+                content.userInfo = userInfo
+            }
+
             let request = UNNotificationRequest(
                 identifier: identifier,
                 content: content,
@@ -71,10 +100,36 @@ final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
+    private func deliverTarget(_ target: NotificationTarget) {
+        guard target.sessionId != nil || target.tavernCharacterId != nil else { return }
+        if let onSelectTarget {
+            onSelectTarget(target)
+        } else {
+            pendingTarget = target
+        }
+    }
+
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
         [.banner, .list, .sound]
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        let info = response.notification.request.content.userInfo
+        let sessionId = info["sessionId"] as? String
+        let tavernCharacterId: Int? = {
+            if let intVal = info["tavernCharacterId"] as? Int { return intVal }
+            if let numVal = info["tavernCharacterId"] as? NSNumber { return numVal.intValue }
+            return nil
+        }()
+        let target = NotificationTarget(sessionId: sessionId, tavernCharacterId: tavernCharacterId)
+        await MainActor.run {
+            NotificationManager.shared.deliverTarget(target)
+        }
     }
 }

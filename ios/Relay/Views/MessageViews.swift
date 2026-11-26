@@ -8,18 +8,47 @@ struct MessageRow: View, Equatable {
     let style: AgentStyle
     let agentName: String
     let imageNamespace: Namespace.ID
+    var canRetry: Bool = false
+    var isRunning: Bool = false
+    var loadingFileId: String? = nil
     var onOpenImage: (Attachment) -> Void
+    var onOpenFile: (Attachment) -> Void = { _ in }
+    var onRetryAssistant: (() -> Void)? = nil
+    var onEditResendUser: (() -> Void)? = nil
+    var onResendUser: (() -> Void)? = nil
 
     nonisolated static func == (lhs: MessageRow, rhs: MessageRow) -> Bool {
-        lhs.message == rhs.message && lhs.style == rhs.style && lhs.agentName == rhs.agentName
+        lhs.message == rhs.message
+            && lhs.style == rhs.style
+            && lhs.agentName == rhs.agentName
+            && lhs.canRetry == rhs.canRetry
+            && lhs.isRunning == rhs.isRunning
+            && lhs.loadingFileId == rhs.loadingFileId
     }
 
     var body: some View {
         switch message.role {
         case .user:
-            UserMessageView(message: message, style: style, imageNamespace: imageNamespace, onOpenImage: onOpenImage)
+            UserMessageView(
+                message: message,
+                style: style,
+                imageNamespace: imageNamespace,
+                isRunning: isRunning,
+                loadingFileId: loadingFileId,
+                onOpenImage: onOpenImage,
+                onOpenFile: onOpenFile,
+                onEditResend: onEditResendUser,
+                onResend: onResendUser
+            )
         case .assistant:
-            AssistantMessageView(message: message, style: style, agentName: agentName)
+            AssistantMessageView(
+                message: message,
+                style: style,
+                agentName: agentName,
+                canRetry: canRetry,
+                isRunning: isRunning,
+                onRetry: onRetryAssistant
+            )
         }
     }
 }
@@ -30,7 +59,12 @@ struct UserMessageView: View {
     let message: Message
     let style: AgentStyle
     let imageNamespace: Namespace.ID
+    var isRunning: Bool = false
+    var loadingFileId: String? = nil
     var onOpenImage: (Attachment) -> Void
+    var onOpenFile: (Attachment) -> Void = { _ in }
+    var onEditResend: (() -> Void)? = nil
+    var onResend: (() -> Void)? = nil
 
     private var images: [Attachment] { message.attachments.filter(\.isImage) }
     private var files: [Attachment] { message.attachments.filter { !$0.isImage } }
@@ -47,7 +81,20 @@ struct UserMessageView: View {
             if !files.isEmpty {
                 VStack(alignment: .trailing, spacing: 6) {
                     ForEach(files) { file in
-                        FileChip(filename: file.filename, mimeType: file.mimeType, sizeBytes: file.sizeBytes)
+                        Button {
+                            Haptics.tap(.soft)
+                            onOpenFile(file)
+                        } label: {
+                            FileChip(
+                                filename: file.filename,
+                                mimeType: file.mimeType,
+                                sizeBytes: file.sizeBytes,
+                                isLoading: loadingFileId == file.id
+                            )
+                        }
+                        .buttonStyle(.pressable)
+                        .disabled(loadingFileId == file.id)
+                        .accessibilityLabel("预览文件 \(file.filename)")
                     }
                 }
             }
@@ -78,19 +125,44 @@ struct UserMessageView: View {
                         )
                         .stroke(style.tint.opacity(0.18), lineWidth: 0.6)
                     )
-                    .contextMenu {
-                        Button {
-                            UIPasteboard.general.string = message.content
-                            Haptics.success()
-                        } label: {
-                            Label("拷贝", systemImage: "doc.on.doc")
-                        }
-                    }
+                    .contextMenu { userContextMenuItems }
             }
         }
         .opacity(isPending ? 0.7 : 1)
         .frame(maxWidth: .infinity, alignment: .trailing)
         .padding(.leading, 44)
+        .contextMenu {
+            if !showsText {
+                userContextMenuItems
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var userContextMenuItems: some View {
+        if showsText {
+            Button {
+                UIPasteboard.general.string = message.content
+                Haptics.success()
+            } label: {
+                Label("拷贝", systemImage: "doc.on.doc")
+            }
+        }
+        if showsText, let onEditResend {
+            Button {
+                onEditResend()
+            } label: {
+                Label("编辑并重发", systemImage: "square.and.pencil")
+            }
+        }
+        if let onResend {
+            Button {
+                onResend()
+            } label: {
+                Label("重新发送", systemImage: "arrow.clockwise")
+            }
+            .disabled(isRunning)
+        }
     }
 
     private var imageStack: some View {
@@ -127,6 +199,7 @@ struct FileChip: View {
     var filename: String
     var mimeType: String
     var sizeBytes: Int
+    var isLoading: Bool = false
 
     static func symbol(for mimeType: String, filename: String) -> String {
         let ext = (filename as NSString).pathExtension.lowercased()
@@ -146,9 +219,13 @@ struct FileChip: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .fill(Palette.fieldFill)
-                Image(systemName: Self.symbol(for: mimeType, filename: filename))
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Palette.textSecondary)
+                if isLoading {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: Self.symbol(for: mimeType, filename: filename))
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Palette.textSecondary)
+                }
             }
             .frame(width: 34, height: 34)
             VStack(alignment: .leading, spacing: 2) {
@@ -157,15 +234,19 @@ struct FileChip: View {
                     .foregroundStyle(Palette.textPrimary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(RelayFormat.bytes(sizeBytes))
+                Text(isLoading ? "正在打开…" : RelayFormat.bytes(sizeBytes))
                     .font(.system(size: 11.5))
                     .foregroundStyle(Palette.textTertiary)
             }
+            Spacer(minLength: 4)
+            Image(systemName: "eye")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Palette.textTertiary)
         }
         .padding(.leading, 8)
-        .padding(.trailing, 14)
+        .padding(.trailing, 12)
         .padding(.vertical, 8)
-        .frame(maxWidth: 260, alignment: .leading)
+        .frame(maxWidth: 270, alignment: .leading)
         .cardSurface(radius: 16)
     }
 }
@@ -176,12 +257,18 @@ struct AssistantMessageView: View {
     let message: Message
     let style: AgentStyle
     let agentName: String
+    var canRetry: Bool = false
+    var isRunning: Bool = false
+    var onRetry: (() -> Void)? = nil
 
     @State private var copied = false
 
     private var isStreaming: Bool { message.isStreaming }
     private var hasContent: Bool { !message.content.isEmpty }
     private var isThinkingPhase: Bool { isStreaming && !hasContent }
+    private var showsRetryPill: Bool {
+        !isStreaming && (message.isError || message.isCancelled) && canRetry && onRetry != nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -213,7 +300,7 @@ struct AssistantMessageView: View {
                     .padding(.vertical, 6)
             }
 
-            if !isStreaming && hasContent {
+            if !isStreaming && (hasContent || showsRetryPill) {
                 footer
             }
         }
@@ -231,25 +318,64 @@ struct AssistantMessageView: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 14) {
-            Button {
-                UIPasteboard.general.string = message.content
-                Haptics.success()
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { copied = true }
-                Task {
-                    try? await Task.sleep(for: .milliseconds(1500))
-                    withAnimation(.easeOut(duration: 0.2)) { copied = false }
+        HStack(spacing: 12) {
+            if showsRetryPill, let onRetry {
+                Button {
+                    Haptics.tap(.medium)
+                    onRetry()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 11, weight: .bold))
+                        Text("重试")
+                    }
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(style.gradient))
                 }
-            } label: {
-                Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                    .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(copied ? Palette.success : Palette.textTertiary)
-                    .contentTransition(.symbolEffect(.replace))
-                    .frame(width: 28, height: 24)
-                    .contentShape(Rectangle())
+                .buttonStyle(.pressable)
+                .disabled(isRunning)
+                .accessibilityLabel("重试请求")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("拷贝回复")
+
+            if hasContent {
+                Button {
+                    UIPasteboard.general.string = message.content
+                    Haptics.success()
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { copied = true }
+                    Task {
+                        try? await Task.sleep(for: .milliseconds(1500))
+                        withAnimation(.easeOut(duration: 0.2)) { copied = false }
+                    }
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(copied ? Palette.success : Palette.textTertiary)
+                        .contentTransition(.symbolEffect(.replace))
+                        .frame(width: 28, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("拷贝回复")
+
+                if !showsRetryPill, canRetry, let onRetry {
+                    Button {
+                        Haptics.tap(.soft)
+                        onRetry()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(Palette.textTertiary)
+                            .frame(width: 28, height: 24)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isRunning)
+                    .accessibilityLabel("重新生成")
+                }
+            }
 
             if let total = message.usage?.displayTotal {
                 Text("\(RelayFormat.tokens(total)) tokens")
@@ -341,7 +467,7 @@ struct ThinkingCapsule: View {
     }
 }
 
-// MARK: - Tool activity pill (quiet, no diffs)
+// MARK: - Tool activity pill (expandable details)
 
 struct ToolActivityPill: View {
     let tools: [ToolActivity]
@@ -349,6 +475,7 @@ struct ToolActivityPill: View {
     let style: AgentStyle
 
     @State private var expanded = false
+    @State private var expandedToolIds: Set<String> = []
 
     private var isRunning: Bool { isStreaming && tools.contains(where: \.isActive) }
     private var failedCount: Int { tools.filter(\.isFailed).count }
@@ -407,20 +534,51 @@ struct ToolActivityPill: View {
             .animation(.easeInOut(duration: 0.25), value: isRunning)
 
             if expanded {
-                VStack(alignment: .leading, spacing: 9) {
+                VStack(alignment: .leading, spacing: 10) {
                     ForEach(tools) { tool in
-                        HStack(spacing: 10) {
-                            Image(systemName: Self.symbol(for: tool.kind))
-                                .font(.system(size: 11.5, weight: .medium))
-                                .foregroundStyle(Palette.textTertiary)
-                                .frame(width: 16)
-                            Text(tool.title)
-                                .font(.system(size: 12.5))
-                                .foregroundStyle(Palette.textSecondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Spacer(minLength: 6)
-                            statusGlyph(tool)
+                        let isDetailOpen = expandedToolIds.contains(tool.id)
+                        let expandable = tool.hasDetails || tool.title.count > 28 || tool.name != tool.title
+                        VStack(alignment: .leading, spacing: 6) {
+                            Button {
+                                guard expandable else { return }
+                                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                                    if isDetailOpen {
+                                        expandedToolIds.remove(tool.id)
+                                    } else {
+                                        expandedToolIds.insert(tool.id)
+                                    }
+                                }
+                                Haptics.selection()
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: Self.symbol(for: tool.kind))
+                                        .font(.system(size: 11.5, weight: .medium))
+                                        .foregroundStyle(tool.isFailed ? Palette.danger : Palette.textTertiary)
+                                        .frame(width: 16)
+                                    Text(tool.title)
+                                        .font(.system(size: 12.5, weight: isDetailOpen ? .semibold : .regular))
+                                        .foregroundStyle(isDetailOpen ? Palette.textPrimary : Palette.textSecondary)
+                                        .lineLimit(isDetailOpen ? nil : 1)
+                                        .truncationMode(.middle)
+                                        .multilineTextAlignment(.leading)
+                                    Spacer(minLength: 6)
+                                    if expandable {
+                                        Image(systemName: "chevron.right")
+                                            .font(.system(size: 8.5, weight: .bold))
+                                            .foregroundStyle(Palette.textTertiary)
+                                            .rotationEffect(.degrees(isDetailOpen ? 90 : 0))
+                                    }
+                                    statusGlyph(tool)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            if isDetailOpen {
+                                toolDetailPanel(tool)
+                                    .padding(.leading, 26)
+                                    .transition(.opacity.combined(with: .move(edge: .top)))
+                            }
                         }
                     }
                 }
@@ -433,6 +591,86 @@ struct ToolActivityPill: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
+    }
+
+    @ViewBuilder
+    private func toolDetailPanel(_ tool: ToolActivity) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text(tool.name)
+                    .font(RelayFont.mono(10.5, weight: .semibold))
+                    .foregroundStyle(style.tint)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(style.wash))
+                Text(tool.status)
+                    .font(RelayFont.mono(10.5))
+                    .foregroundStyle(tool.isFailed ? Palette.danger : Palette.textTertiary)
+            }
+
+            if !tool.locations.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(tool.locations, id: \.self) { loc in
+                        HStack(spacing: 5) {
+                            Image(systemName: "mappin.and.ellipse")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Palette.textTertiary)
+                            Text(loc)
+                                .font(RelayFont.mono(11))
+                                .foregroundStyle(Palette.textSecondary)
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                        }
+                    }
+                }
+            }
+
+            if let input = tool.inputPreview, !input.isEmpty {
+                toolPayloadBox(title: "输入", content: input)
+            }
+            if let output = tool.outputPreview, !output.isEmpty {
+                toolPayloadBox(title: "输出", content: output)
+            }
+        }
+    }
+
+    private func toolPayloadBox(title: String, content: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Palette.textTertiary)
+                Spacer()
+                Button {
+                    UIPasteboard.general.string = content
+                    Haptics.success()
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Palette.textTertiary)
+                        .padding(4)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("拷贝\(title)")
+            }
+            ScrollView {
+                Text(content)
+                    .font(RelayFont.mono(11.5))
+                    .foregroundStyle(Palette.textPrimary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+            .frame(maxHeight: 160)
+        }
+        .padding(9)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Palette.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Palette.hairline, lineWidth: 0.6)
+        )
     }
 
     @ViewBuilder

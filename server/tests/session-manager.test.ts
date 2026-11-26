@@ -3,9 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
+import { createRelayServer, type RelayServerInstance } from "../src/app.js";
 import { SessionManager, type WsEventEnvelope } from "../src/acp/manager.js";
 import type { AgentProfile, AppConfig } from "../src/config.js";
 import { RelayDatabase } from "../src/db.js";
+import { cleanupOrphanUploads } from "../src/utils/uploads-cleanup.js";
 
 const mockSessionAgentScript = `
 const fs = require("node:fs");
@@ -173,6 +175,49 @@ rl.on("line", (line) => {
         params: {
           sessionId: sid,
           update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "查到了。" } },
+        },
+      });
+      send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } });
+      return;
+    }
+
+    if (scenario === "tool_details") {
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: sid,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "tool-bash-1",
+            name: "Bash",
+            title: "Run tests",
+            kind: "execute",
+            status: "in_progress",
+            rawInput: { command: "npm test", cwd: "/opt/relay" },
+            locations: [{ path: "/opt/relay/package.json", line: 11 }],
+          },
+        },
+      });
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: sid,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "tool-bash-1",
+            status: "completed",
+            rawOutput: "\\u001b[32m18 passing\\u001b[0m",
+          },
+        },
+      });
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: sid,
+          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done." } },
         },
       });
       send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } });
@@ -409,5 +454,212 @@ describe("SessionManager ACP turn isolation & spacing", () => {
       .map((line) => (JSON.parse(line) as { method?: string }).method);
     assert.ok(methods.includes("session/load"), "session/load should have been called");
     assert.equal(methods.includes("session/prompt"), false, "session/prompt should NOT be sent");
+  });
+
+  it("captures and merges tool_call inputPreview, outputPreview and locations across updates", async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-sm-tooldetails-"));
+    const scriptPath = path.join(tmpDir, "mock-agent.cjs");
+    fs.writeFileSync(scriptPath, mockSessionAgentScript, "utf8");
+
+    const config = makeTestConfig(tmpDir);
+    db = new RelayDatabase(config.dbPath);
+    const agent: AgentProfile = {
+      id: "codebuddy",
+      name: "CodeBuddy",
+      subtitle: "Mock",
+      icon: "terminal",
+      accent: "#6C8CFF",
+      command: process.execPath,
+      args: [scriptPath],
+      env: { MOCK_SCENARIO: "tool_details" },
+    };
+    manager = new SessionManager(config, db, [agent]);
+
+    const session = await manager.createSession({ agentId: "codebuddy", cwd: config.defaultCwd });
+    const toolEvents: WsEventEnvelope[] = [];
+    const unsub = manager.subscribe((ev) => {
+      if (ev.sessionId === session.id && ev.type === "tool_activity") {
+        toolEvents.push(ev);
+      }
+    });
+
+    const completedPromise = waitForEvent(manager, session.id, (ev) => ev.type === "turn_completed");
+    const { assistantMessage } = await manager.startPrompt(session.id, { text: "run tests" });
+    await completedPromise;
+    unsub();
+
+    assert.equal(toolEvents.length, 2);
+    const stored = db.listMessages(session.id).find((m) => m.id === assistantMessage.id);
+    assert.ok(stored);
+    assert.equal(stored.toolCalls.length, 1);
+    const tool = stored.toolCalls[0];
+    assert.equal(tool.status, "completed");
+    assert.match(tool.inputPreview ?? "", /npm test/);
+    assert.equal(tool.outputPreview, "18 passing");
+    assert.deepEqual(tool.locations, ["/opt/relay/package.json:11"]);
+  });
+});
+
+describe("Session pinning & upload cleanup", () => {
+  let tmpDir: string | null = null;
+  let server: RelayServerInstance | null = null;
+  let db: RelayDatabase | null = null;
+
+  afterEach(async () => {
+    await server?.close();
+    server = null;
+    db?.close();
+    db = null;
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 6, retryDelay: 80 });
+      tmpDir = null;
+    }
+  });
+
+  it("pins/unpins sessions via PATCH without altering updatedAt and orders pinned first", async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-pin-"));
+    const config = makeTestConfig(tmpDir);
+    server = await createRelayServer(config, []);
+
+    server.db.createSession({
+      id: "sess-older",
+      agentId: "agy",
+      acpSessionId: null,
+      title: "Older",
+      cwd: config.defaultCwd,
+      currentModelId: null,
+      currentModeId: null,
+      availableModels: [],
+      availableModes: [],
+      configOptions: [],
+      availableCommands: [],
+      now: 1000,
+    });
+    server.db.createSession({
+      id: "sess-newer",
+      agentId: "agy",
+      acpSessionId: null,
+      title: "Newer",
+      cwd: config.defaultCwd,
+      currentModelId: null,
+      currentModeId: null,
+      availableModels: [],
+      availableModes: [],
+      configOptions: [],
+      availableCommands: [],
+      now: 2000,
+    });
+
+    const patchRes = await server.app.inject({
+      method: "PATCH",
+      url: "/api/sessions/sess-older",
+      headers: { Authorization: `Bearer ${config.relayToken}` },
+      payload: { pinned: true },
+    });
+    assert.equal(patchRes.statusCode, 200);
+    const patched = patchRes.json() as { session: { pinned: boolean; updatedAt: number } };
+    assert.equal(patched.session.pinned, true);
+    assert.equal(patched.session.updatedAt, 1000);
+
+    const ordered = server.db.listSessions().map((s) => s.id);
+    assert.deepEqual(ordered, ["sess-older", "sess-newer"]);
+
+    const unpinRes = await server.app.inject({
+      method: "PATCH",
+      url: "/api/sessions/sess-older",
+      headers: { Authorization: `Bearer ${config.relayToken}` },
+      payload: { pinned: false },
+    });
+    assert.equal(unpinRes.statusCode, 200);
+    assert.deepEqual(
+      server.db.listSessions().map((s) => s.id),
+      ["sess-newer", "sess-older"]
+    );
+  });
+
+  it("removes unreferenced session uploads on delete and purges aged orphans", () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-uploads-"));
+    const config = makeTestConfig(tmpDir);
+    db = new RelayDatabase(config.dbPath);
+    const manager = new SessionManager(config, db, []);
+
+    for (const id of ["sess-a", "sess-b"]) {
+      db.createSession({
+        id,
+        agentId: "agy",
+        acpSessionId: null,
+        title: id,
+        cwd: config.defaultCwd,
+        currentModelId: null,
+        currentModeId: null,
+        availableModels: [],
+        availableModes: [],
+        configOptions: [],
+        availableCommands: [],
+        now: 1000,
+      });
+    }
+
+    const fileOnlyA = path.join(config.uploadsDir, "only-a.txt");
+    const fileShared = path.join(config.uploadsDir, "shared.txt");
+    const fileAgedOrphan = path.join(config.uploadsDir, "aged-orphan.txt");
+    const fileFreshOrphan = path.join(config.uploadsDir, "fresh-orphan.txt");
+    const fileStrayAged = path.join(config.uploadsDir, "stray-aged.bin");
+    for (const f of [fileOnlyA, fileShared, fileAgedOrphan, fileFreshOrphan, fileStrayAged]) {
+      fs.writeFileSync(f, "data");
+    }
+    const oldMs = Date.now() - 48 * 60 * 60 * 1000;
+    const oldSec = oldMs / 1000;
+    fs.utimesSync(fileStrayAged, oldSec, oldSec);
+
+    db.createUpload({ id: "u-only-a", filename: "only-a.txt", mimeType: "text/plain", sizeBytes: 4, diskPath: fileOnlyA, createdAt: Date.now() });
+    db.createUpload({ id: "u-shared", filename: "shared.txt", mimeType: "text/plain", sizeBytes: 4, diskPath: fileShared, createdAt: Date.now() });
+    db.createUpload({ id: "u-aged-orphan", filename: "aged-orphan.txt", mimeType: "text/plain", sizeBytes: 4, diskPath: fileAgedOrphan, createdAt: oldMs });
+    db.createUpload({ id: "u-fresh-orphan", filename: "fresh-orphan.txt", mimeType: "text/plain", sizeBytes: 4, diskPath: fileFreshOrphan, createdAt: Date.now() });
+
+    db.createMessage({
+      id: "m-a",
+      sessionId: "sess-a",
+      role: "user",
+      content: "hi",
+      thinking: "",
+      attachments: [
+        { id: "u-only-a", filename: "only-a.txt", mimeType: "text/plain", sizeBytes: 4, isImage: false },
+        { id: "u-shared", filename: "shared.txt", mimeType: "text/plain", sizeBytes: 4, isImage: false },
+      ],
+      toolCalls: [],
+      usage: null,
+      status: "completed",
+      createdAt: 1001,
+    });
+    db.createMessage({
+      id: "m-b",
+      sessionId: "sess-b",
+      role: "user",
+      content: "hi",
+      thinking: "",
+      attachments: [
+        { id: "u-shared", filename: "shared.txt", mimeType: "text/plain", sizeBytes: 4, isImage: false },
+      ],
+      toolCalls: [],
+      usage: null,
+      status: "completed",
+      createdAt: 1002,
+    });
+
+    assert.equal(manager.deleteSession("sess-a"), true);
+    assert.equal(db.getUpload("u-only-a"), null);
+    assert.equal(fs.existsSync(fileOnlyA), false);
+    assert.ok(db.getUpload("u-shared"));
+    assert.equal(fs.existsSync(fileShared), true);
+
+    const stats = cleanupOrphanUploads(db, config.uploadsDir, 24 * 60 * 60 * 1000);
+    assert.equal(stats.removedRecords, 1);
+    assert.equal(stats.removedStrayFiles, 1);
+    assert.equal(db.getUpload("u-aged-orphan"), null);
+    assert.equal(fs.existsSync(fileAgedOrphan), false);
+    assert.equal(fs.existsSync(fileStrayAged), false);
+    assert.ok(db.getUpload("u-fresh-orphan"));
+    assert.equal(fs.existsSync(fileFreshOrphan), true);
   });
 });

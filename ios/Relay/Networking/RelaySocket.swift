@@ -1,6 +1,6 @@
 import Foundation
 
-/// Resilient WebSocket connection to `/ws` with heartbeat + exponential backoff reconnects.
+/// Resilient WebSocket connection to `/ws` with heartbeat + pong timeout detection + exponential backoff reconnects.
 @MainActor
 final class RelaySocket {
     enum State: Equatable {
@@ -21,6 +21,8 @@ final class RelaySocket {
         }
     }
 
+    private let heartbeatInterval: Duration
+    private let pongTimeout: Duration
     private let session = URLSession(configuration: .default)
     private var task: URLSessionWebSocketTask?
     private var request: URLRequest?
@@ -28,8 +30,15 @@ final class RelaySocket {
     private var attempts = 0
     private var everConnected = false
     private var shouldRun = false
+    private var lastReceiveAt: ContinuousClock.Instant = .now
     private var heartbeat: Task<Void, Never>?
+    private var pongTimeoutTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+
+    init(heartbeatInterval: Duration = .seconds(20), pongTimeout: Duration = .seconds(10)) {
+        self.heartbeatInterval = heartbeatInterval
+        self.pongTimeout = pongTimeout
+    }
 
     func connect(_ request: URLRequest) {
         self.request = request
@@ -43,6 +52,7 @@ final class RelaySocket {
         shouldRun = false
         generation += 1
         heartbeat?.cancel()
+        pongTimeoutTask?.cancel()
         reconnectTask?.cancel()
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
@@ -64,6 +74,7 @@ final class RelaySocket {
         guard shouldRun, let request else { return }
         reconnectTask?.cancel()
         heartbeat?.cancel()
+        pongTimeoutTask?.cancel()
         task?.cancel(with: .goingAway, reason: nil)
 
         generation += 1
@@ -71,6 +82,7 @@ final class RelaySocket {
         let newTask = session.webSocketTask(with: request)
         newTask.maximumMessageSize = 16 * 1024 * 1024
         task = newTask
+        lastReceiveAt = .now
         state = .connecting
         newTask.resume()
 
@@ -85,6 +97,9 @@ final class RelaySocket {
                 do {
                     let message = try await socket.receive()
                     guard let self, self.generation == gen else { return }
+                    self.lastReceiveAt = .now
+                    self.pongTimeoutTask?.cancel()
+                    self.pongTimeoutTask = nil
                     self.markConnected()
                     switch message {
                     case .string(let text):
@@ -115,7 +130,7 @@ final class RelaySocket {
     private func startHeartbeat(generation gen: Int) {
         heartbeat = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(20))
+                try? await Task.sleep(for: self?.heartbeatInterval ?? .seconds(20))
                 guard let self, self.generation == gen, !Task.isCancelled else { return }
                 self.sendPing()
             }
@@ -125,6 +140,9 @@ final class RelaySocket {
     private func sendPing() {
         guard let socket = task else { return }
         let gen = generation
+        let sentAt = ContinuousClock.Instant.now
+        schedulePongWatchdog(sentAt: sentAt, generation: gen)
+
         Task { [weak self] in
             do {
                 try await socket.send(.string("{\"type\":\"ping\"}"))
@@ -135,8 +153,22 @@ final class RelaySocket {
         }
     }
 
+    private func schedulePongWatchdog(sentAt: ContinuousClock.Instant, generation gen: Int) {
+        pongTimeoutTask?.cancel()
+        let timeout = pongTimeout
+        pongTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard let self, !Task.isCancelled, self.generation == gen else { return }
+            if self.lastReceiveAt < sentAt {
+                self.handleFailure()
+            }
+        }
+    }
+
     private func handleFailure() {
         heartbeat?.cancel()
+        pongTimeoutTask?.cancel()
+        pongTimeoutTask = nil
         task?.cancel(with: .abnormalClosure, reason: nil)
         task = nil
         generation += 1

@@ -16,6 +16,7 @@ import { SwarmManager } from "./swarm/manager.js";
 import { registerSwarmMcpRoutes } from "./swarm/mcp.js";
 import { TavernBridge } from "./tavern/bridge.js";
 import type { TavernBridgeLike } from "./tavern/types.js";
+import { cleanupOrphanUploads } from "./utils/uploads-cleanup.js";
 
 export interface RelayServerInstance {
   app: FastifyInstance;
@@ -30,6 +31,7 @@ export interface RelayServerInstance {
 
 export interface CreateRelayServerOptions {
   tavernBridge?: TavernBridgeLike;
+  logger?: boolean | { level?: string };
 }
 
 export async function createRelayServer(
@@ -47,7 +49,9 @@ export async function createRelayServer(
   const tavernBridge: TavernBridgeLike =
     options?.tavernBridge ?? new TavernBridge(config, db, manager);
 
-  const app = Fastify({ logger: false });
+  const loggingEnabled = Boolean(options?.logger);
+  const app = Fastify({ logger: options?.logger ?? false });
+  let uploadCleanupTimer: NodeJS.Timeout | null = null;
 
   await app.register(multipart, {
     limits: {
@@ -58,6 +62,26 @@ export async function createRelayServer(
   await app.register(websocket);
 
   app.addHook("onRequest", makeAuthHook(config.relayToken, internalMcpToken));
+
+  if (loggingEnabled) {
+    app.addHook("onError", async (req, _reply, err) => {
+      app.log.error({ err, method: req.method, url: req.url }, "relay request error");
+    });
+    app.addHook("onResponse", async (req, reply) => {
+      if (reply.statusCode >= 500 || reply.elapsedTime > 5000) {
+        const level = reply.statusCode >= 500 ? "error" : "warn";
+        app.log[level](
+          {
+            method: req.method,
+            url: req.url,
+            statusCode: reply.statusCode,
+            elapsedMs: Math.round(reply.elapsedTime),
+          },
+          "relay response anomaly"
+        );
+      }
+    });
+  }
 
   app.get("/healthz", async () => ({
     ok: true,
@@ -91,10 +115,29 @@ export async function createRelayServer(
       }
     });
 
+    socket.on("error", (err: Error) => {
+      if (loggingEnabled) {
+        app.log.warn({ err }, "relay websocket error");
+      }
+    });
+
     socket.on("close", () => {
       unsubscribe();
     });
   });
+
+  const runUploadCleanup = () => {
+    try {
+      const result = cleanupOrphanUploads(db, config.uploadsDir);
+      if (loggingEnabled && (result.removedRecords > 0 || result.removedStrayFiles > 0)) {
+        app.log.warn(result, "cleaned orphan uploads");
+      }
+    } catch (err) {
+      if (loggingEnabled) {
+        app.log.warn({ err }, "orphan upload cleanup failed");
+      }
+    }
+  };
 
   const listen = async () => {
     await app.listen({ host: config.host, port: config.port });
@@ -105,6 +148,11 @@ export async function createRelayServer(
     if (tavernBridge instanceof TavernBridge && config.tavernEnabled) {
       tavernBridge.warmup();
     }
+    setImmediate(runUploadCleanup);
+    if (!uploadCleanupTimer) {
+      uploadCleanupTimer = setInterval(runUploadCleanup, 6 * 60 * 60 * 1000);
+      uploadCleanupTimer.unref();
+    }
     return {
       host: config.host,
       port: boundPort,
@@ -113,6 +161,10 @@ export async function createRelayServer(
   };
 
   const close = async () => {
+    if (uploadCleanupTimer) {
+      clearInterval(uploadCleanupTimer);
+      uploadCleanupTimer = null;
+    }
     await tavernBridge.dispose();
     swarmManager.disposeAll();
     await manager.disposeAll();

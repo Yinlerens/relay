@@ -4,7 +4,9 @@ import { loadAgentProfiles, loadConfig } from "./config.js";
 async function main(): Promise<void> {
   const config = loadConfig();
   const agents = loadAgentProfiles(config.agentsConfigPath);
-  const server = await createRelayServer(config, agents);
+  const server = await createRelayServer(config, agents, {
+    logger: { level: process.env.RELAY_LOG_LEVEL || "warn" },
+  });
 
   const shutdown = async () => {
     await server.close();

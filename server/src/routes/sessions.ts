@@ -93,22 +93,38 @@ export function registerSessionRoutes(
     return { session, messages };
   });
 
-  app.patch<{ Params: { id: string }; Body: { title?: string } }>(
+  app.patch<{ Params: { id: string }; Body: { title?: string; pinned?: boolean } }>(
     "/api/sessions/:id",
     async (req, reply) => {
       const session = db.getSession(req.params.id, manager.getRunningSessionIds());
       if (!session) {
         return reply.code(404).send({ error: "Session not found" });
       }
-      const title = req.body?.title?.trim();
-      if (!title) {
-        return reply.code(400).send({ error: "title is required" });
+      const hasTitle = req.body?.title !== undefined;
+      const hasPinned = typeof req.body?.pinned === "boolean";
+      if (!hasTitle && !hasPinned) {
+        return reply.code(400).send({ error: "title or pinned is required" });
       }
-      const cleanTitle = title.slice(0, 80);
-      if (session.swarmRole === "coordinator" && session.swarmId && swarmManager) {
-        swarmManager.updateSwarm(session.swarmId, { title: cleanTitle });
-      } else {
-        db.updateSession(session.id, { title: cleanTitle });
+      if (hasTitle) {
+        const title = req.body?.title?.trim();
+        if (!title) {
+          return reply.code(400).send({ error: "title cannot be empty" });
+        }
+        const cleanTitle = title.slice(0, 80);
+        if (session.swarmRole === "coordinator" && session.swarmId && swarmManager) {
+          swarmManager.updateSwarm(session.swarmId, { title: cleanTitle });
+        } else {
+          db.updateSession(session.id, {
+            title: cleanTitle,
+            ...(hasPinned ? { pinned: req.body.pinned } : {}),
+          });
+        }
+      }
+      if (hasPinned && (!hasTitle || (session.swarmRole === "coordinator" && session.swarmId && swarmManager))) {
+        db.updateSession(session.id, {
+          pinned: Boolean(req.body.pinned),
+          touchUpdatedAt: false,
+        });
       }
       const updated = db.getSession(session.id, manager.getRunningSessionIds());
       if (updated) {

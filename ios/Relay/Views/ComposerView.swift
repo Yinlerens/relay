@@ -53,6 +53,7 @@ struct ComposerView: View {
     let style: AgentStyle
     let agentName: String
     @Binding var text: String
+    var focusTrigger: Int = 0
 
     @Environment(AppStore.self) private var store
     @State private var attachments: [PendingAttachment] = []
@@ -138,6 +139,9 @@ struct ComposerView: View {
         .animation(.spring(response: 0.34, dampingFraction: 0.86), value: matches.map(\.name))
         .animation(.spring(response: 0.34, dampingFraction: 0.86), value: attachments)
         .animation(.easeInOut(duration: 0.2), value: focused)
+        .onChange(of: focusTrigger) { _, _ in
+            focused = true
+        }
         .photosPicker(isPresented: $showPhotoPicker, selection: $photoItems, maxSelectionCount: 6, matching: .images)
         .onChange(of: photoItems) { _, items in
             guard !items.isEmpty else { return }

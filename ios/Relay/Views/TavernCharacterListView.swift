@@ -129,6 +129,7 @@ struct TavernCharacterListView<Header: View>: View {
                             character: character,
                             isCurrent: isCurrent,
                             isGenerating: isGenerating,
+                            hasDraft: store.hasTavernDraft(for: character.id),
                             generationError: rowError
                         )
                     }
@@ -440,6 +441,7 @@ struct TavernCharacterRow: View {
     let character: TavernCharacter
     let isCurrent: Bool
     let isGenerating: Bool
+    var hasDraft: Bool = false
     var generationError: TavernGenerationError? = nil
 
     private var subtitleText: String {
@@ -511,6 +513,17 @@ struct TavernCharacterRow: View {
                         .foregroundStyle(Palette.danger)
                         .lineLimit(1)
                         .truncationMode(.tail)
+                } else if hasDraft {
+                    HStack(spacing: 4) {
+                        Text("[草稿]")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .foregroundStyle(TavernTheme.tint)
+                        Text(subtitleText)
+                            .font(.system(size: 13.5))
+                            .foregroundStyle(Palette.textSecondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                 } else {
                     Text(subtitleText)
                         .font(.system(size: 13.5))

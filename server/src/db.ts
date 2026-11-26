@@ -37,6 +37,7 @@ export interface SessionSummary {
   swarmRole: SwarmRole | null;
   swarmMemberName: string | null;
   worktreeBranch: string | null;
+  pinned: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -203,6 +204,7 @@ export class RelayDatabase {
     addSessionCol("swarm_role", "TEXT");
     addSessionCol("swarm_member_name", "TEXT");
     addSessionCol("worktree_branch", "TEXT");
+    addSessionCol("pinned", "INTEGER NOT NULL DEFAULT 0");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_swarm ON sessions(swarm_id);");
 
     // Recover cleanly if a previous server restart interrupted in-flight turns or workers
@@ -239,6 +241,7 @@ export class RelayDatabase {
           : null,
       swarmMemberName: row.swarm_member_name ? String(row.swarm_member_name) : null,
       worktreeBranch: row.worktree_branch ? String(row.worktree_branch) : null,
+      pinned: Boolean(row.pinned),
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
     };
@@ -274,7 +277,7 @@ export class RelayDatabase {
              AND typeof(json_extract(usage_json, '$.credits')) IN ('integer', 'real')
            GROUP BY session_id
          ) c ON c.session_id = s.id
-         ORDER BY s.updated_at DESC`
+         ORDER BY s.pinned DESC, s.updated_at DESC`
       )
       .all() as Record<string, unknown>[];
     return rows.map((row) => this.mapSession(row, runningIds));
@@ -372,7 +375,9 @@ export class RelayDatabase {
       swarmRole: SwarmRole | null;
       swarmMemberName: string | null;
       worktreeBranch: string | null;
+      pinned: boolean;
       updatedAt: number;
+      touchUpdatedAt: boolean;
     }>
   ): void {
     const sets: string[] = [];
@@ -401,8 +406,14 @@ export class RelayDatabase {
     if (patch.swarmRole !== undefined) add("swarm_role", patch.swarmRole);
     if (patch.swarmMemberName !== undefined) add("swarm_member_name", patch.swarmMemberName);
     if (patch.worktreeBranch !== undefined) add("worktree_branch", patch.worktreeBranch);
-    add("updated_at", patch.updatedAt ?? Date.now());
+    if (patch.pinned !== undefined) add("pinned", patch.pinned ? 1 : 0);
+    if (patch.updatedAt !== undefined) {
+      add("updated_at", patch.updatedAt);
+    } else if (patch.touchUpdatedAt !== false) {
+      add("updated_at", Date.now());
+    }
 
+    if (sets.length === 0) return;
     values.push(id);
     this.db.prepare(`UPDATE sessions SET ${sets.join(", ")} WHERE id = ?`).run(...(values as never[]));
   }
@@ -540,6 +551,55 @@ export class RelayDatabase {
       diskPath: String(row.disk_path),
       createdAt: Number(row.created_at),
     };
+  }
+
+  listUploads(): UploadRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM uploads ORDER BY created_at ASC")
+      .all() as Record<string, unknown>[];
+    return rows.map((row) => ({
+      id: String(row.id),
+      filename: String(row.filename),
+      mimeType: String(row.mime_type),
+      sizeBytes: Number(row.size_bytes),
+      diskPath: String(row.disk_path),
+      createdAt: Number(row.created_at),
+    }));
+  }
+
+  deleteUpload(id: string): boolean {
+    const res = this.db.prepare("DELETE FROM uploads WHERE id = ?").run(id);
+    return Number(res.changes) > 0;
+  }
+
+  listSessionAttachmentIds(sessionId: string): string[] {
+    const rows = this.db
+      .prepare(
+        "SELECT attachments_json FROM messages WHERE session_id = ? AND attachments_json IS NOT NULL AND attachments_json != '[]'"
+      )
+      .all(sessionId) as Array<{ attachments_json?: string }>;
+    const ids = new Set<string>();
+    for (const row of rows) {
+      for (const att of safeJson<AttachmentRef[]>(row.attachments_json, [])) {
+        if (att?.id) ids.add(att.id);
+      }
+    }
+    return Array.from(ids);
+  }
+
+  listAllReferencedAttachmentIds(): Set<string> {
+    const rows = this.db
+      .prepare(
+        "SELECT attachments_json FROM messages WHERE attachments_json IS NOT NULL AND attachments_json != '[]'"
+      )
+      .all() as Array<{ attachments_json?: string }>;
+    const ids = new Set<string>();
+    for (const row of rows) {
+      for (const att of safeJson<AttachmentRef[]>(row.attachments_json, [])) {
+        if (att?.id) ids.add(att.id);
+      }
+    }
+    return ids;
   }
 
   getSetting(key: string): string | null {

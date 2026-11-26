@@ -208,12 +208,61 @@ struct SessionSummary: Codable, Identifiable, Hashable, Sendable {
     var swarmRole: String?
     var swarmMemberName: String?
     var worktreeBranch: String?
+    var pinned: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, agentId, acpSessionId, title, cwd, currentModelId, currentModeId
         case availableModels, availableModes, configOptions, availableCommands
         case contextUsed, contextSize, isRunning, createdAt, updatedAt, totalCredits
-        case swarmId, swarmRole, swarmMemberName, worktreeBranch
+        case swarmId, swarmRole, swarmMemberName, worktreeBranch, pinned
+    }
+
+    init(
+        id: String,
+        agentId: String,
+        acpSessionId: String? = nil,
+        title: String = "新对话",
+        cwd: String = "",
+        currentModelId: String? = nil,
+        currentModeId: String? = nil,
+        availableModels: [ModelInfo] = [],
+        availableModes: [ModeInfo] = [],
+        configOptions: [ConfigOption] = [],
+        availableCommands: [SlashCommand] = [],
+        contextUsed: Int = 0,
+        contextSize: Int = 0,
+        isRunning: Bool = false,
+        createdAt: Double = 0,
+        updatedAt: Double = 0,
+        totalCredits: Double? = nil,
+        swarmId: String? = nil,
+        swarmRole: String? = nil,
+        swarmMemberName: String? = nil,
+        worktreeBranch: String? = nil,
+        pinned: Bool = false
+    ) {
+        self.id = id
+        self.agentId = agentId
+        self.acpSessionId = acpSessionId
+        self.title = title
+        self.cwd = cwd
+        self.currentModelId = currentModelId
+        self.currentModeId = currentModeId
+        self.availableModels = availableModels
+        self.availableModes = availableModes
+        self.configOptions = configOptions
+        self.availableCommands = availableCommands
+        self.contextUsed = contextUsed
+        self.contextSize = contextSize
+        self.isRunning = isRunning
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.totalCredits = totalCredits
+        self.swarmId = swarmId
+        self.swarmRole = swarmRole
+        self.swarmMemberName = swarmMemberName
+        self.worktreeBranch = worktreeBranch
+        self.pinned = pinned
     }
 
     init(from decoder: Decoder) throws {
@@ -239,6 +288,7 @@ struct SessionSummary: Codable, Identifiable, Hashable, Sendable {
         swarmRole = c.flexOptionalString(.swarmRole)
         swarmMemberName = c.flexOptionalString(.swarmMemberName)
         worktreeBranch = c.flexOptionalString(.worktreeBranch)
+        pinned = c.flexBool(.pinned, default: false)
     }
 
     var isSwarmCoordinator: Bool { swarmRole == "coordinator" }
@@ -276,8 +326,33 @@ struct ToolActivity: Codable, Identifiable, Hashable, Sendable {
     var title: String
     var kind: String
     var status: String
+    var inputPreview: String?
+    var outputPreview: String?
+    var locations: [String]
 
-    enum CodingKeys: String, CodingKey { case id, name, title, kind, status }
+    enum CodingKeys: String, CodingKey {
+        case id, name, title, kind, status, inputPreview, outputPreview, locations
+    }
+
+    init(
+        id: String,
+        name: String = "tool",
+        title: String,
+        kind: String = "other",
+        status: String = "completed",
+        inputPreview: String? = nil,
+        outputPreview: String? = nil,
+        locations: [String] = []
+    ) {
+        self.id = id
+        self.name = name
+        self.title = title
+        self.kind = kind
+        self.status = status
+        self.inputPreview = inputPreview
+        self.outputPreview = outputPreview
+        self.locations = locations
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -286,10 +361,16 @@ struct ToolActivity: Codable, Identifiable, Hashable, Sendable {
         title = c.flexString(.title, default: name)
         kind = c.flexString(.kind, default: "other")
         status = c.flexString(.status, default: "in_progress")
+        inputPreview = c.flexOptionalString(.inputPreview)
+        outputPreview = c.flexOptionalString(.outputPreview)
+        locations = c.flexArray(String.self, .locations)
     }
 
     var isActive: Bool { status == "pending" || status == "in_progress" }
     var isFailed: Bool { status == "failed" || status == "error" }
+    var hasDetails: Bool {
+        !(inputPreview ?? "").isEmpty || !(outputPreview ?? "").isEmpty || !locations.isEmpty
+    }
 }
 
 struct Attachment: Codable, Identifiable, Hashable, Sendable {

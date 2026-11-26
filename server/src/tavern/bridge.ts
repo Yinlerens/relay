@@ -15,6 +15,28 @@ import {
   type RawExtractedMessage,
 } from "./dom-extractor.js";
 import type {
+  PwBrowserContext,
+  PwModule,
+  PwPage,
+  PwResponse,
+} from "./browser-types.js";
+import { parseTimestampToMs } from "./browser-types.js";
+import {
+  classifyTavernError,
+  extractTavernResponseError,
+  formatTavernHttpError,
+  httpError,
+} from "./errors.js";
+import {
+  TAVERN_BIND_PAGE_EVENTS_SCRIPT,
+  TAVERN_CURRENT_META_SCRIPT,
+  TAVERN_EXTRACT_CHARACTERS_SCRIPT,
+  TAVERN_FETCH_LOGIN_USERS_SCRIPT,
+  TAVERN_REFRESH_CHARACTERS_SCRIPT,
+  TAVERN_STREAM_DELTA_SCRIPT,
+  TAVERN_UI_PROBE_SCRIPT,
+} from "./page-scripts.js";
+import type {
   TavernBridgeLike,
   TavernCharacter,
   TavernChatFile,
@@ -29,244 +51,7 @@ import type {
   TavernSwipeDirection,
 } from "./types.js";
 
-interface PwCookie {
-  name: string;
-  value: string;
-}
-
-interface PwResponse {
-  url(): string;
-  status(): number;
-  headers(): Record<string, string>;
-  text(): Promise<string>;
-}
-
-interface PwPage {
-  url(): string;
-  goto(url: string, opts?: { waitUntil?: string; timeout?: number }): Promise<unknown>;
-  reload(opts?: { waitUntil?: string; timeout?: number }): Promise<unknown>;
-  evaluate<R = unknown, A = unknown>(fn: string | ((arg: A) => R | Promise<R>), arg?: A): Promise<R>;
-  exposeFunction(name: string, fn: (...args: unknown[]) => unknown): Promise<void>;
-  isClosed(): boolean;
-  on(event: string, listener: (...args: unknown[]) => void): void;
-}
-
-interface PwBrowserContext {
-  pages(): PwPage[];
-  newPage(): Promise<PwPage>;
-  cookies(urls?: string | string[]): Promise<PwCookie[]>;
-  on(event: string, listener: (...args: unknown[]) => void): void;
-  close(): Promise<void>;
-}
-
-interface PwModule {
-  chromium: {
-    launchPersistentContext(
-      userDataDir: string,
-      options: Record<string, unknown>
-    ): Promise<PwBrowserContext>;
-  };
-}
-
-function httpError(statusCode: number, message: string): Error {
-  const err = new Error(message) as Error & { statusCode?: number };
-  err.statusCode = statusCode;
-  return err;
-}
-
-function parseTimestampToMs(raw: unknown): number {
-  if (typeof raw === "number" && Number.isFinite(raw)) {
-    return raw > 0 && raw < 1e12 ? raw * 1000 : raw;
-  }
-  if (typeof raw === "string" && raw.trim()) {
-    const asNum = Number(raw);
-    if (Number.isFinite(asNum)) {
-      return asNum > 0 && asNum < 1e12 ? asNum * 1000 : asNum;
-    }
-    const parsed = Date.parse(raw);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return 0;
-}
-
-export function formatTavernHttpError(status: number, rawBody: string): string {
-  let detail = "";
-  const trimmed = String(rawBody || "").trim();
-  if (trimmed) {
-    try {
-      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-      const errField = parsed?.error;
-      if (errField && typeof errField === "object") {
-        const msg = (errField as Record<string, unknown>).message;
-        if (typeof msg === "string" && msg.trim()) {
-          detail = msg.trim();
-        }
-      } else if (typeof errField === "string" && errField.trim()) {
-        detail = errField.trim();
-      }
-      if (!detail && typeof parsed?.message === "string" && parsed.message.trim()) {
-        detail = parsed.message.trim();
-      }
-    } catch {
-      // Plain text or HTML error response
-    }
-    if (!detail) {
-      detail = trimmed.replace(/<[^>]*>/g, " ");
-    }
-    detail = detail.replace(/\s+/g, " ").trim().slice(0, 180);
-  }
-
-  if (status === 429) {
-    return detail
-      ? `上游接口限流 (429)：${detail}`
-      : "上游接口限流 (429)：资源暂时耗尽，请稍后重试";
-  }
-  if (status === 401 || status === 403) {
-    return `上游接口鉴权或权限拒绝 (${status})${detail ? `：${detail}` : ""}`;
-  }
-  if (status >= 500) {
-    return `上游接口服务异常 (${status})${detail ? `：${detail}` : ""}`;
-  }
-  return `生成请求失败 (${status})${detail ? `：${detail}` : ""}`;
-}
-
-export function classifyTavernError(
-  message: string,
-  statusCode?: number | null
-): TavernErrorKind {
-  if (
-    statusCode === 429 ||
-    /429|RESOURCE_EXHAUSTED|rate.?limit|quota|too many requests|限流/i.test(message)
-  ) {
-    return "rate_limit";
-  }
-  if (/PROHIBITED_CONTENT|SAFETY|blockReason|blocked|content.?policy|审核|拦截|拒绝/i.test(message)) {
-    return "safety";
-  }
-  if (
-    statusCode === 401 ||
-    statusCode === 403 ||
-    /401|403|unauthorized|forbidden|api.?key|鉴权/i.test(message)
-  ) {
-    return "auth";
-  }
-  if (
-    (statusCode !== undefined && statusCode !== null && statusCode >= 500) ||
-    /500|502|503|504|bad gateway|overloaded|unavailable|服务异常/i.test(message)
-  ) {
-    return "server";
-  }
-  if (/timeout|timed out|ECONNREFUSED|ENOTFOUND|network|fetch failed|连接/i.test(message)) {
-    return "network";
-  }
-  return "unknown";
-}
-
-export function extractTavernResponseError(
-  status: number,
-  contentType: string,
-  rawBody: string
-): { message: string; kind: TavernErrorKind; code: number | null } | null {
-  if (status >= 400) {
-    const message = formatTavernHttpError(status, rawBody);
-    return { message, kind: classifyTavernError(message, status), code: status };
-  }
-  if (status < 200 || status >= 300) {
-    return null;
-  }
-
-  const trimmed = String(rawBody || "").trim();
-  if (!trimmed) return null;
-  const ct = String(contentType || "").toLowerCase();
-
-  if (ct.includes("json") || trimmed.startsWith("{")) {
-    try {
-      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-      const errField = parsed?.error;
-      let detail = "";
-      if (errField && typeof errField === "object") {
-        const msg = (errField as Record<string, unknown>).message;
-        if (typeof msg === "string" && msg.trim()) detail = msg.trim();
-      } else if (typeof errField === "string" && errField.trim()) {
-        detail = errField.trim();
-      }
-      if (detail) {
-        detail = detail.replace(/\s+/g, " ").trim().slice(0, 180);
-        const kind = classifyTavernError(detail, null);
-        const message =
-          kind === "safety"
-            ? `内容被上游安全审核拦截：${detail}`
-            : `上游接口返回错误：${detail}`;
-        return { message, kind, code: null };
-      }
-    } catch {
-      // Ignore malformed JSON
-    }
-    return null;
-  }
-
-  if (ct.includes("event-stream") || trimmed.includes("data:")) {
-    const lines = trimmed.split(/\r?\n/);
-    let hasText = false;
-    let foundError: string | null = null;
-    let safetyReason: string | null = null;
-
-    for (const line of lines) {
-      const m = line.match(/^\s*data:\s*(.+)$/);
-      if (!m) continue;
-      const payloadStr = m[1].trim();
-      if (!payloadStr || payloadStr === "[DONE]") continue;
-      try {
-        const chunk = JSON.parse(payloadStr) as Record<string, unknown>;
-        if (chunk?.error && typeof chunk.error === "object") {
-          const msg = (chunk.error as Record<string, unknown>).message;
-          if (typeof msg === "string" && msg.trim()) foundError = msg.trim();
-        }
-        const pf = chunk?.promptFeedback as Record<string, unknown> | undefined;
-        if (pf && typeof pf.blockReason === "string" && pf.blockReason) {
-          safetyReason = pf.blockReason;
-        }
-        const cands = chunk?.candidates as Array<Record<string, unknown>> | undefined;
-        if (Array.isArray(cands)) {
-          for (const cand of cands) {
-            const content = cand?.content as Record<string, unknown> | undefined;
-            const parts = content?.parts as Array<Record<string, unknown>> | undefined;
-            if (Array.isArray(parts)) {
-              for (const p of parts) {
-                if (typeof p?.text === "string" && p.text.trim() && !p.thought) {
-                  hasText = true;
-                }
-              }
-            }
-            const fr = typeof cand?.finishReason === "string" ? cand.finishReason : "";
-            if (/^(PROHIBITED_CONTENT|SAFETY|BLOCKLIST|RECITATION|SPII)$/i.test(fr)) {
-              safetyReason = fr;
-            }
-          }
-        }
-      } catch {
-        // Ignore non-JSON SSE lines
-      }
-    }
-
-    if (foundError && !hasText) {
-      const clean = foundError.replace(/\s+/g, " ").trim().slice(0, 180);
-      const kind = classifyTavernError(clean, null);
-      const message =
-        kind === "safety" ? `内容被上游安全审核拦截：${clean}` : `上游接口返回错误：${clean}`;
-      return { message, kind, code: null };
-    }
-    if (safetyReason && !hasText) {
-      return {
-        message: `内容被上游安全审核拦截 (${safetyReason})`,
-        kind: "safety",
-        code: null,
-      };
-    }
-  }
-
-  return null;
-}
+export { classifyTavernError, extractTavernResponseError, formatTavernHttpError };
 
 export class TavernBridge implements TavernBridgeLike {
   private readonly authStore: TavernAuthStore;
@@ -548,30 +333,7 @@ export class TavernBridge implements TavernBridgeLike {
         hasContext: boolean;
         charCount: number;
         preloaderVisible: boolean;
-      }>(`(() => {
-        const pathname = window.location.pathname || "";
-        const isLogin =
-          pathname.startsWith("/login") ||
-          Boolean(document.querySelector("#userList, #userHandle, #loginButton"));
-        const st = window.SillyTavern;
-        const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
-        const hasContext = Boolean(ctx && Array.isArray(ctx.characters));
-        const preloader = document.querySelector("#preloader");
-        let preloaderVisible = false;
-        if (preloader) {
-          const style = window.getComputedStyle(preloader);
-          preloaderVisible =
-            style.display !== "none" &&
-            style.visibility !== "hidden" &&
-            Number(style.opacity || "1") > 0.05;
-        }
-        return {
-          isLogin,
-          hasContext,
-          charCount: hasContext ? ctx.characters.length : 0,
-          preloaderVisible,
-        };
-      })()`);
+      }>(TAVERN_UI_PROBE_SCRIPT);
 
       if (probe.isLogin) {
         if (!skipAutoLogin) {
@@ -631,30 +393,7 @@ export class TavernBridge implements TavernBridgeLike {
     const page = this.page;
     if (!page || page.isClosed()) return [];
     try {
-      return await page.evaluate<TavernLoginUser[]>(`(async () => {
-        try {
-          const csrfRes = await fetch("/csrf-token");
-          const csrfData = await csrfRes.json();
-          const res = await fetch("/api/users/list", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-CSRF-Token": csrfData.token || "",
-            },
-          });
-          if (!res.ok || res.status === 204) return [];
-          const list = await res.json();
-          if (!Array.isArray(list)) return [];
-          return list
-            .filter((u) => u && typeof u.handle === "string")
-            .map((u) => ({
-              handle: String(u.handle),
-              name: String(u.name || u.handle),
-            }));
-        } catch {
-          return [];
-        }
-      })()`);
+      return await page.evaluate<TavernLoginUser[]>(TAVERN_FETCH_LOGIN_USERS_SCRIPT);
     } catch {
       return [];
     }
@@ -698,88 +437,7 @@ export class TavernBridge implements TavernBridgeLike {
   private async bindPageEvents(): Promise<void> {
     const page = this.page;
     if (!page || page.isClosed()) return;
-    await page.evaluate(`(() => {
-      if (window.__relayTavernBound) return;
-      const st = window.SillyTavern;
-      const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
-      if (!ctx || !ctx.eventSource) return;
-      window.__relayTavernBound = true;
-      const es = ctx.eventSource;
-      const et = ctx.eventTypes || ctx.event_types || {};
-      const isLiveGen = () => {
-        const stopEl = document.querySelector("#mes_stop");
-        let stopVisible = false;
-        if (stopEl) {
-          const style = window.getComputedStyle(stopEl);
-          stopVisible = style.display !== "none" && style.visibility !== "hidden";
-        }
-        return Boolean(
-          stopVisible ||
-          ctx.streamingProcessor ||
-          document.body?.dataset?.generating === "true"
-        );
-      };
-      const emit = (name, payload) => {
-        if (typeof window.__relayTavernEvent === "function") {
-          window.__relayTavernEvent(name, payload);
-        }
-      };
-      const bind = (eventKey, fallbackName, tag) => {
-        const evName = et[eventKey] || fallbackName;
-        if (evName && typeof es.on === "function") {
-          es.on(evName, (data) => {
-            try {
-              emit(tag, {
-                value: typeof data === "string" || typeof data === "number" ? data : null,
-                isLiveGenerating: isLiveGen(),
-              });
-            } catch {}
-          });
-        }
-      };
-      bind("GENERATION_STARTED", "generation_started", "GENERATION_STARTED");
-      bind("STREAM_TOKEN_RECEIVED", "stream_token_received", "STREAM_TOKEN_RECEIVED");
-      bind("GENERATION_ENDED", "generation_ended", "GENERATION_ENDED");
-      bind("GENERATION_STOPPED", "generation_stopped", "GENERATION_STOPPED");
-      bind("MESSAGE_RECEIVED", "message_received", "MESSAGE_RECEIVED");
-      bind("CHARACTER_MESSAGE_RENDERED", "character_message_rendered", "CHARACTER_MESSAGE_RENDERED");
-      bind("MESSAGE_SWIPED", "message_swiped", "MESSAGE_SWIPED");
-      bind("CHAT_CHANGED", "chat_changed", "CHAT_CHANGED");
-
-      const reportToastNode = (node) => {
-        if (!node || node.nodeType !== 1) return;
-        const targets = [];
-        if (node.matches && node.matches(".toast-error, .toast-warning")) targets.push(node);
-        if (node.querySelectorAll) {
-          node.querySelectorAll(".toast-error, .toast-warning").forEach((el) => targets.push(el));
-        }
-        for (const toast of targets) {
-          const title = (toast.querySelector(".toast-title")?.textContent || "").trim();
-          const body = (toast.querySelector(".toast-message")?.textContent || "").trim();
-          const combined = [title, body].filter(Boolean).join("：") || (toast.textContent || "").trim();
-          const level = toast.classList && toast.classList.contains("toast-warning") ? "warning" : "error";
-          if (combined) emit("TOAST_ERROR", { message: combined, level });
-        }
-      };
-      if (typeof MutationObserver !== "undefined" && document.body) {
-        const toastObserver = new MutationObserver((mutations) => {
-          for (const m of mutations) {
-            for (const added of m.addedNodes) {
-              if (added && added.nodeType === 1) {
-                const inToast =
-                  (added.closest && added.closest("#toast-container")) ||
-                  (added.id === "toast-container") ||
-                  (added.classList &&
-                    (added.classList.contains("toast-error") || added.classList.contains("toast-warning"))) ||
-                  (added.querySelector && added.querySelector(".toast-error, .toast-warning"));
-                if (inToast) reportToastNode(added);
-              }
-            }
-          }
-        });
-        toastObserver.observe(document.body, { childList: true, subtree: true });
-      }
-    })()`);
+    await page.evaluate(TAVERN_BIND_PAGE_EVENTS_SCRIPT);
   }
 
   private async syncCurrentSelectionMeta(): Promise<void> {
@@ -792,33 +450,7 @@ export class TavernBridge implements TavernBridgeLike {
         characterAvatar: string | null;
         chatFile: string | null;
         isLiveGenerating: boolean;
-      }>(`(() => {
-        const st = window.SillyTavern;
-        const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
-        if (!ctx) return { characterId: null, characterName: null, characterAvatar: null, chatFile: null, isLiveGenerating: false };
-        const rawId = ctx.characterId;
-        const idNum = rawId !== undefined && rawId !== null && rawId !== "" ? Number(rawId) : NaN;
-        const ch = Number.isFinite(idNum) && Array.isArray(ctx.characters) ? ctx.characters[idNum] : null;
-        const chatId = typeof ctx.getCurrentChatId === "function" ? ctx.getCurrentChatId() : ctx.chatId;
-        const stopEl = document.querySelector("#mes_stop");
-        let stopVisible = false;
-        if (stopEl) {
-          const style = window.getComputedStyle(stopEl);
-          stopVisible = style.display !== "none" && style.visibility !== "hidden";
-        }
-        const isLiveGenerating = Boolean(
-          stopVisible ||
-          ctx.streamingProcessor ||
-          document.body?.dataset?.generating === "true"
-        );
-        return {
-          characterId: ch ? idNum : null,
-          characterName: ch ? String(ch.name || "") : null,
-          characterAvatar: ch && ch.avatar ? String(ch.avatar) : null,
-          chatFile: chatId ? String(chatId) : (ch && ch.chat ? String(ch.chat) : null),
-          isLiveGenerating,
-        };
-      })()`);
+      }>(TAVERN_CURRENT_META_SCRIPT);
       this.currentCharacterId = meta.characterId;
       this.currentCharacterName = meta.characterName;
       this.currentCharacterAvatar = meta.characterAvatar;
@@ -1306,41 +938,7 @@ export class TavernBridge implements TavernBridgeLike {
         mesId: number | null;
         text: string;
         reasoning: string;
-      } | null>(`(() => {
-        const st = window.SillyTavern;
-        const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
-        if (!ctx || !Array.isArray(ctx.chat)) return null;
-        const stopEl = document.querySelector("#mes_stop");
-        let stopVisible = false;
-        if (stopEl) {
-          const style = window.getComputedStyle(stopEl);
-          stopVisible = style.display !== "none" && style.visibility !== "hidden";
-        }
-        const isLiveGenerating = Boolean(
-          stopVisible ||
-          ctx.streamingProcessor ||
-          document.body?.dataset?.generating === "true"
-        );
-        if (ctx.chat.length === 0) {
-          return { isLiveGenerating, mesId: null, text: "", reasoning: "" };
-        }
-        const sp = ctx.streamingProcessor;
-        const mesId = sp && typeof sp.messageId === "number" ? sp.messageId : ctx.chat.length - 1;
-        const m = ctx.chat[mesId];
-        if (!m || m.is_user) {
-          return { isLiveGenerating, mesId: null, text: "", reasoning: "" };
-        }
-        const mesEl = document.querySelector('.mes[mesid="' + mesId + '"]');
-        const domReasoning = mesEl ? (mesEl.querySelector(".mes_reasoning")?.textContent || "") : "";
-        const text =
-          (sp && typeof sp.text === "string" && sp.text) ||
-          String(m.mes || "");
-        const reasoning =
-          (sp && typeof sp.reasoning === "string" && sp.reasoning) ||
-          (m.extra && typeof m.extra.reasoning === "string" ? m.extra.reasoning : "") ||
-          domReasoning;
-        return { isLiveGenerating, mesId, text, reasoning };
-      })()`);
+      } | null>(TAVERN_STREAM_DELTA_SCRIPT);
 
       if (!snap) return;
 
@@ -1463,48 +1061,7 @@ export class TavernBridge implements TavernBridgeLike {
         tags: string[];
         tagline: string;
       }>
-    >(`(() => {
-      const st = window.SillyTavern;
-      const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
-      if (!ctx || !Array.isArray(ctx.characters)) return [];
-      const tagById = new Map();
-      if (Array.isArray(ctx.tags)) {
-        for (const t of ctx.tags) {
-          if (t && t.id && t.name) tagById.set(String(t.id), String(t.name));
-        }
-      }
-      const tagMap = ctx.tagMap && typeof ctx.tagMap === "object" ? ctx.tagMap : {};
-      return ctx.characters.map((ch, idx) => {
-        const avatar = String(ch.avatar || "");
-        const tagSet = new Set();
-        const mappedIds = Array.isArray(tagMap[avatar]) ? tagMap[avatar] : [];
-        for (const tid of mappedIds) {
-          const tn = tagById.get(String(tid));
-          if (tn) tagSet.add(tn);
-        }
-        const embeddedTags = Array.isArray(ch.data?.tags)
-          ? ch.data.tags
-          : Array.isArray(ch.tags)
-            ? ch.tags
-            : [];
-        for (const t of embeddedTags) {
-          if (typeof t === "string" && t.trim()) tagSet.add(t.trim());
-        }
-        const rawNotes = String(
-          ch.data?.creator_notes || ch.creatorcomment || ch.description || ch.first_mes || ""
-        );
-        const tagline = rawNotes.replace(/\\s+/g, " ").trim().slice(0, 120);
-        return {
-          id: idx,
-          name: String(ch.name || "未命名角色"),
-          avatar,
-          chat: ch.chat ? String(ch.chat) : null,
-          lastChatRaw: ch.date_last_chat ?? ch.last_mes ?? 0,
-          tags: Array.from(tagSet).slice(0, 8),
-          tagline,
-        };
-      });
-    })()`);
+    >(TAVERN_EXTRACT_CHARACTERS_SCRIPT);
 
     return raw
       .map((c) => ({
@@ -1631,33 +1188,7 @@ export class TavernBridge implements TavernBridgeLike {
   async listCharacters(): Promise<{ status: TavernStatus; characters: TavernCharacter[] }> {
     await this.ensureInitialized();
     if (this.ready && this.page && !this.page.isClosed() && !this.isGenerating) {
-      await this.page
-        .evaluate(`(async () => {
-          const st = window.SillyTavern;
-          const ctx = st && typeof st.getContext === "function" ? st.getContext() : null;
-          if (!ctx || !Array.isArray(ctx.characters)) return;
-          const res = await fetch("/api/characters/all", {
-            method: "POST",
-            headers: ctx.getRequestHeaders(),
-            body: JSON.stringify({}),
-          });
-          if (!res.ok) return;
-          const freshList = await res.json();
-          if (!Array.isArray(freshList)) return;
-          const byAvatar = new Map();
-          for (const item of freshList) {
-            if (item && item.avatar) byAvatar.set(String(item.avatar), item);
-          }
-          for (const ch of ctx.characters) {
-            if (!ch || !ch.avatar) continue;
-            const fresh = byAvatar.get(String(ch.avatar));
-            if (!fresh) continue;
-            if (fresh.chat) ch.chat = String(fresh.chat);
-            if (fresh.date_last_chat !== undefined) ch.date_last_chat = fresh.date_last_chat;
-            if (fresh.last_mes !== undefined) ch.last_mes = fresh.last_mes;
-          }
-        })()`)
-        .catch(() => {});
+      await this.page.evaluate(TAVERN_REFRESH_CHARACTERS_SCRIPT).catch(() => {});
     }
     const characters = this.ready ? await this.extractCharactersInternal() : [];
     return { status: this.buildStatus(), characters };

@@ -48,6 +48,42 @@ jobs:
           xcodegen generate
           ls -la
 
+      - name: Run iOS Unit Tests
+        run: |
+          set -euo pipefail
+          cd ios
+          mkdir -p build
+          SIM_UDID=$(python3 - <<'PY'
+          import json, re, subprocess
+          data = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "-j"]))
+          candidates = []
+          for runtime, devs in data.get("devices", {}).items():
+              if "iOS" not in runtime:
+                  continue
+              nums = [int(x) for x in re.findall(r"(\d+)", runtime)]
+              ver = tuple(nums[:3]) if nums else (0,)
+              for d in devs:
+                  if d.get("isAvailable") and "iPhone" in d.get("name", ""):
+                      candidates.append((ver, "Pro" in d.get("name", ""), d["udid"], d["name"], runtime))
+          if not candidates:
+              raise SystemExit("No available iOS Simulator iPhone device found")
+          candidates.sort(reverse=True)
+          best = candidates[0]
+          import sys
+          print(f"Using simulator: {best[3]} ({best[4]}) -> {best[2]}", file=sys.stderr)
+          print(best[2])
+          PY
+          )
+          xcodebuild test \
+            -project Relay.xcodeproj \
+            -scheme Relay \
+            -destination "platform=iOS Simulator,id=${SIM_UDID}" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" \
+            | tee build/xctest.log
+
       - name: Archive (no code signing)
         shell: bash
         run: |

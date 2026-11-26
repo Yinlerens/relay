@@ -1,4 +1,5 @@
 import SwiftUI
+import QuickLook
 import UIKit
 
 struct ChatView: View {
@@ -6,7 +7,6 @@ struct ChatView: View {
 
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
-    @State private var draft = ""
     @State private var showConfig = false
     @State private var showContextInfo = false
     @State private var showQuota = false
@@ -14,9 +14,19 @@ struct ChatView: View {
     @State private var isAtBottom = true
     @State private var userInteractedWithScroll = false
     @State private var lightbox: Attachment?
+    @State private var previewFileURL: URL? = nil
+    @State private var loadingFileId: String? = nil
+    @State private var focusComposerTrigger = 0
     @Namespace private var imageZoomNamespace
 
     private let bottomID = "chat-bottom"
+
+    private var draftBinding: Binding<String> {
+        Binding(
+            get: { store.agentDraft(for: sessionId) },
+            set: { store.setAgentDraft($0, for: sessionId) }
+        )
+    }
 
     var body: some View {
         let session = store.session(sessionId)
@@ -39,20 +49,41 @@ struct ChatView: View {
                         .padding(.top, 80)
                     } else if messages.isEmpty, let session {
                         ChatEmptyState(session: session, swarm: swarm, agentName: agentName, style: style) { suggestion in
-                            draft = suggestion
+                            store.setAgentDraft(suggestion, for: sessionId)
+                            focusComposerTrigger += 1
                         }
                         .padding(.top, 40)
                     }
 
-                    ForEach(messages) { message in
+                    ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+                        let prevUser = message.role == .assistant ? precedingUserMessage(before: index, in: messages) : nil
                         MessageRow(
                             message: message,
                             style: style,
                             agentName: agentName,
-                            imageNamespace: imageZoomNamespace
-                        ) { attachment in
-                            lightbox = attachment
-                        }
+                            imageNamespace: imageZoomNamespace,
+                            canRetry: !isRunning && prevUser != nil,
+                            isRunning: isRunning,
+                            loadingFileId: loadingFileId,
+                            onOpenImage: { attachment in
+                                lightbox = attachment
+                            },
+                            onOpenFile: { attachment in
+                                openFilePreview(attachment)
+                            },
+                            onRetryAssistant: prevUser.map { userMsg in
+                                { resendUserMessage(userMsg) }
+                            },
+                            onEditResendUser: {
+                                let text = (message.content == "[附件]" && !message.attachments.isEmpty) ? "" : message.content
+                                store.setAgentDraft(text, for: sessionId)
+                                focusComposerTrigger += 1
+                                Haptics.selection()
+                            },
+                            onResendUser: {
+                                resendUserMessage(message)
+                            }
+                        )
                         .equatable()
                         .id(message.id)
                         .transition(.asymmetric(
@@ -156,7 +187,13 @@ struct ChatView: View {
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                ComposerView(sessionId: sessionId, style: style, agentName: agentName, text: $draft)
+                ComposerView(
+                    sessionId: sessionId,
+                    style: style,
+                    agentName: agentName,
+                    text: draftBinding,
+                    focusTrigger: focusComposerTrigger
+                )
             }
         }
         .background(AmbientBackground(tint: style.glow))
@@ -236,6 +273,7 @@ struct ChatView: View {
             LightboxView(attachment: attachment)
                 .navigationTransition(.zoom(sourceID: attachment.id, in: imageZoomNamespace))
         }
+        .quickLookPreview($previewFileURL)
         .sheet(isPresented: $showQuota) {
             QuotaSheet(focusAgent: session?.agentId)
         }
@@ -275,6 +313,39 @@ struct ChatView: View {
     private func streamSignature(_ messages: [Message]) -> Int {
         guard let last = messages.last else { return 0 }
         return last.content.utf8.count &+ last.thinking.utf8.count &* 31 &+ last.toolCalls.count &* 7919
+    }
+
+    private func precedingUserMessage(before index: Int, in messages: [Message]) -> Message? {
+        guard index > 0 else { return nil }
+        for i in stride(from: index - 1, through: 0, by: -1) {
+            if messages[i].role == .user {
+                return messages[i]
+            }
+        }
+        return nil
+    }
+
+    private func resendUserMessage(_ userMessage: Message) {
+        let outgoing = (userMessage.content == "[附件]" && !userMessage.attachments.isEmpty) ? "" : userMessage.content
+        Task {
+            await store.send(sessionId: sessionId, text: outgoing, attachments: userMessage.attachments)
+        }
+    }
+
+    private func openFilePreview(_ attachment: Attachment) {
+        guard let api = store.api, loadingFileId != attachment.id else { return }
+        loadingFileId = attachment.id
+        Task {
+            do {
+                let url = try await AttachmentFileCache.shared.localPreviewURL(for: attachment, api: api)
+                loadingFileId = nil
+                previewFileURL = url
+            } catch {
+                loadingFileId = nil
+                Haptics.error()
+                store.showBanner("打开附件失败：\(error.localizedDescription)")
+            }
+        }
     }
 }
 

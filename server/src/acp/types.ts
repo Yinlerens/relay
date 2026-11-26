@@ -40,6 +40,9 @@ export interface ToolActivityItem {
   title: string;
   kind: string;
   status: string;
+  inputPreview?: string;
+  outputPreview?: string;
+  locations?: string[];
 }
 
 export interface AttachmentRef {

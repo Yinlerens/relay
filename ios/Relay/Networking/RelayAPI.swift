@@ -148,6 +148,10 @@ struct RelayAPI: Sendable {
         try await json("/api/sessions/\(id)", method: "PATCH", body: ["title": title], as: SessionEnvelope.self).session
     }
 
+    func setSessionPinned(id: String, pinned: Bool) async throws -> SessionSummary {
+        try await json("/api/sessions/\(id)", method: "PATCH", body: ["pinned": pinned], as: SessionEnvelope.self).session
+    }
+
     func deleteSession(id: String) async throws {
         _ = try await json("/api/sessions/\(id)", method: "DELETE", as: OkResponse.self)
     }

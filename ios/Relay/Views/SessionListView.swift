@@ -7,12 +7,19 @@ struct SessionGroup: Identifiable {
     let sessions: [SessionSummary]
 }
 
+enum AgentFilter: Hashable {
+    case all
+    case agent(String)
+    case swarm
+}
+
 struct SessionListView: View {
     @Environment(AppStore.self) private var store
     @State private var agentPath = NavigationPath()
     @State private var tavernPath = NavigationPath()
     @State private var sessionTrail: [String] = []
     @State private var agentSearch = ""
+    @State private var agentFilter: AgentFilter = .all
     @State private var tavernSearch = ""
     @State private var showSettings = false
     @State private var showNewSession = false
@@ -23,10 +30,19 @@ struct SessionListView: View {
     @State private var showRename = false
 
     private var filtered: [SessionSummary] {
-        let base = store.topLevelSessions
+        let byFilter = store.topLevelSessions.filter { s in
+            switch agentFilter {
+            case .all:
+                return true
+            case .swarm:
+                return s.isSwarmCoordinator
+            case .agent(let agentId):
+                return !s.isSwarmCoordinator && s.agentId == agentId
+            }
+        }
         let query = agentSearch.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !query.isEmpty else { return base }
-        return base.filter { s in
+        guard !query.isEmpty else { return byFilter }
+        return byFilter.filter { s in
             if s.title.lowercased().contains(query) { return true }
             if store.agent(for: s.agentId)?.name.lowercased().contains(query) ?? false { return true }
             if s.currentModelName?.lowercased().contains(query) ?? false { return true }
@@ -41,10 +57,15 @@ struct SessionListView: View {
 
     private var groups: [SessionGroup] {
         let calendar = Calendar.current
+        var pinned: [SessionSummary] = []
         var today: [SessionSummary] = []
         var yesterday: [SessionSummary] = []
         var earlier: [SessionSummary] = []
         for s in filtered {
+            if s.pinned {
+                pinned.append(s)
+                continue
+            }
             let date = s.updatedDate
             if calendar.isDateInToday(date) {
                 today.append(s)
@@ -55,6 +76,7 @@ struct SessionListView: View {
             }
         }
         return [
+            SessionGroup(id: "pinned", title: "置顶", sessions: pinned),
             SessionGroup(id: "today", title: "今天", sessions: today),
             SessionGroup(id: "yesterday", title: "昨天", sessions: yesterday),
             SessionGroup(id: "earlier", title: "更早", sessions: earlier),
@@ -268,6 +290,13 @@ struct SessionListView: View {
                 .listRowSeparator(.hidden)
                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 8, trailing: 20))
 
+            if !store.topLevelSessions.isEmpty {
+                agentFilterBar
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 6, trailing: 20))
+            }
+
             if store.topLevelSessions.isEmpty && store.hasBootstrapped {
                 emptyState
                     .listRowBackground(Color.clear)
@@ -304,6 +333,14 @@ struct SessionListView: View {
                     .padding(.vertical, 30)
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
+            } else if agentFilter != .all && filtered.isEmpty && !store.topLevelSessions.isEmpty {
+                Text("该分类下暂无会话")
+                    .font(.system(size: 14))
+                    .foregroundStyle(Palette.textSecondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 30)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
             }
         }
         .listStyle(.plain)
@@ -312,6 +349,48 @@ struct SessionListView: View {
         .refreshable {
             await store.refresh()
         }
+    }
+
+    private var agentFilterBar: some View {
+        let hasSwarms = store.topLevelSessions.contains(where: \.isSwarmCoordinator)
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                filterChip("全部", filter: .all, tint: Palette.textPrimary)
+                ForEach(store.agents) { agent in
+                    let style = store.style(for: agent.id)
+                    filterChip(agent.name, systemImage: style.symbol, filter: .agent(agent.id), tint: style.tint)
+                }
+                if hasSwarms {
+                    filterChip("蜂群", systemImage: SwarmTheme.style.symbol, filter: .swarm, tint: SwarmTheme.style.tint)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    private func filterChip(_ title: String, systemImage: String? = nil, filter: AgentFilter, tint: Color) -> some View {
+        let selected = agentFilter == filter
+        return Button {
+            Haptics.selection()
+            withAnimation(.snappy(duration: 0.22)) {
+                agentFilter = filter
+            }
+        } label: {
+            HStack(spacing: 5) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 10.5, weight: .semibold))
+                }
+                Text(title)
+                    .font(.system(size: 12.5, weight: selected ? .semibold : .medium))
+            }
+            .foregroundStyle(selected ? .white : Palette.textSecondary)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(selected ? tint : Palette.fieldFill))
+            .overlay(Capsule().stroke(selected ? Color.clear : Palette.hairline, lineWidth: 0.6))
+        }
+        .buttonStyle(.pressable)
     }
 
     // MARK: Rows
@@ -336,7 +415,14 @@ struct SessionListView: View {
                 Label("删除", systemImage: "trash")
             }
         }
-        .swipeActions(edge: .leading) {
+        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+            Button {
+                Task { await store.setPinned(session.id, pinned: !session.pinned) }
+            } label: {
+                Label(session.pinned ? "取消置顶" : "置顶", systemImage: session.pinned ? "pin.slash" : "pin")
+            }
+            .tint(Palette.warning)
+
             Button {
                 beginRename(session)
             } label: {
@@ -345,6 +431,11 @@ struct SessionListView: View {
             .tint(store.style(for: session.agentId).glow)
         }
         .contextMenu {
+            Button {
+                Task { await store.setPinned(session.id, pinned: !session.pinned) }
+            } label: {
+                Label(session.pinned ? "取消置顶" : "置顶会话", systemImage: session.pinned ? "pin.slash" : "pin")
+            }
             Button {
                 beginRename(session)
             } label: {
@@ -566,11 +657,24 @@ struct SessionRow: View {
             }
 
             VStack(alignment: .leading, spacing: 5) {
-                HStack(alignment: .firstTextBaseline) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    if session.pinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundStyle(style.tint)
+                    }
                     Text(swarm?.title.isEmpty == false ? (swarm?.title ?? session.title) : session.title)
                         .font(.system(size: 16.5, weight: .semibold))
                         .foregroundStyle(Palette.textPrimary)
                         .lineLimit(1)
+                    if store.hasAgentDraft(for: session.id) {
+                        Text("草稿")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(Palette.warning)
+                            .padding(.horizontal, 5.5)
+                            .padding(.vertical, 1.5)
+                            .background(Capsule().fill(Palette.warning.opacity(0.14)))
+                    }
                     Spacer(minLength: 8)
                     Text(RelayFormat.relative(session.updatedDate))
                         .font(.system(size: 12, weight: .medium))

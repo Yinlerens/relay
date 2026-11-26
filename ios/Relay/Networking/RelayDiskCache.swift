@@ -52,6 +52,11 @@ struct CachedSwarmDetail: Codable, Sendable {
     var updatedAt: Double
 }
 
+struct CachedDrafts: Codable, Sendable, Equatable {
+    var agent: [String: String] = [:]
+    var tavern: [Int: String] = [:]
+}
+
 // MARK: - Unified per-server disk cache with LRU pruning
 
 actor RelayDiskCache {
@@ -265,6 +270,21 @@ actor RelayDiskCache {
     func deleteSwarmDetail(id: String) {
         let file = agentSwarmsDir.appendingPathComponent("\(safeFileComponent(id)).json")
         try? fm.removeItem(at: file)
+    }
+
+    // MARK: Persistent Drafts
+
+    func loadDrafts() -> CachedDrafts? {
+        readJSON(CachedDrafts.self, from: serverDir.appendingPathComponent("drafts.json"))
+    }
+
+    func saveDrafts(_ drafts: CachedDrafts) {
+        let file = serverDir.appendingPathComponent("drafts.json")
+        if drafts.agent.isEmpty && drafts.tavern.isEmpty {
+            try? fm.removeItem(at: file)
+            return
+        }
+        writeJSON(drafts, to: file)
     }
 
     // MARK: Stats & Cleanup

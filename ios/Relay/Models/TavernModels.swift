@@ -243,6 +243,26 @@ struct TavernCharacter: Codable, Identifiable, Hashable, Sendable {
         case id, name, avatar, avatarUrl, chat, lastChatAt, tags, tagline
     }
 
+    init(
+        id: Int,
+        name: String,
+        avatar: String = "",
+        avatarUrl: String = "",
+        chat: String? = nil,
+        lastChatAt: Double = 0,
+        tags: [String] = [],
+        tagline: String = ""
+    ) {
+        self.id = id
+        self.name = name
+        self.avatar = avatar
+        self.avatarUrl = avatarUrl
+        self.chat = chat
+        self.lastChatAt = lastChatAt
+        self.tags = tags
+        self.tagline = tagline
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = c.flexInt(.id)

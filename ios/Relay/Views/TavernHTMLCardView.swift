@@ -278,6 +278,7 @@ private struct TavernWebViewRepresentable: UIViewRepresentable {
         controller.removeScriptMessageHandler(forName: "relayFillDraft")
         webView.navigationDelegate = nil
         webView.stopLoading()
+        webView.loadHTMLString("", baseURL: nil)
     }
 
     private func loadDocumentIfNeeded(into webView: WKWebView, coordinator: Coordinator) {
@@ -290,7 +291,10 @@ private struct TavernWebViewRepresentable: UIViewRepresentable {
             mvuDataJSON: mvuDataJSON,
             isDark: isDark
         )
-        webView.loadHTMLString(document, baseURL: URL(string: "relay-st://asset/"))
+        let baseURL = URL(string: "relay-st://asset/")
+        coordinator.lastLoadedDocument = document
+        coordinator.lastBaseURL = baseURL
+        webView.loadHTMLString(document, baseURL: baseURL)
     }
 
     // MARK: Document composition (ST CSS variables + Mvu/CatGodOracle/localStorage/parent shims + bidirectional resize)
@@ -731,6 +735,9 @@ private struct TavernWebViewRepresentable: UIViewRepresentable {
         var onSend: (String) -> Void
         var onFillDraft: (String) -> Void
         var lastSignature: String = ""
+        var lastLoadedDocument: String = ""
+        var lastBaseURL: URL? = nil
+        private var reloadTimestamps: [Date] = []
 
         init(
             api: RelayAPI,
@@ -792,6 +799,15 @@ private struct TavernWebViewRepresentable: UIViewRepresentable {
                 return .cancel
             }
             return .allow
+        }
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            guard !lastLoadedDocument.isEmpty else { return }
+            let now = Date()
+            reloadTimestamps.removeAll { now.timeIntervalSince($0) > 30 }
+            guard reloadTimestamps.count < 3 else { return }
+            reloadTimestamps.append(now)
+            webView.loadHTMLString(lastLoadedDocument, baseURL: lastBaseURL)
         }
     }
 }
