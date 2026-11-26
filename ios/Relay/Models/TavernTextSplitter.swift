@@ -3,16 +3,16 @@ import Foundation
 // MARK: - Streaming <think> / <thought> splitter
 
 enum TavernTextSplitter {
-    private static let closedTagRegex = #/<(think|thought|thinking)>([\s\S]*?)</\1>/#.ignoresCase()
-    private static let openTagRegex = #/<(?:think|thought|thinking)>([\s\S]*)$/#.ignoresCase()
-    private static let updateVarClosedRegex = #/<UpdateVariable>[\s\S]*?</UpdateVariable>/#.ignoresCase()
-    private static let updateVarOpenRegex = #/<UpdateVariable>[\s\S]*$/#.ignoresCase()
-    private static let statusPlaceholderRegex = #/<StatusPlaceHolderImpl[^>]*>[\s\S]*?</StatusPlaceHolderImpl>/#.ignoresCase()
-    private static let statusPlaceholderSelfClosingRegex = #/<StatusPlaceHolderImpl\s*/?>/#.ignoresCase()
-    private static let commentClosedRegex = #/<comment>[\s\S]*?</comment>/#.ignoresCase()
-    private static let commentOpenRegex = #/<comment>[\s\S]*$/#.ignoresCase()
-
     static func split(rawText: String, explicitReasoning: String, isStreaming: Bool) -> (reasoning: String, visible: String) {
+        let closedTagRegex = #/<(think|thought|thinking)>([\s\S]*?)</\1>/#.ignoresCase()
+        let openTagRegex = #/<(?:think|thought|thinking)>([\s\S]*)$/#.ignoresCase()
+        let updateVarClosedRegex = #/<UpdateVariable>[\s\S]*?</UpdateVariable>/#.ignoresCase()
+        let updateVarOpenRegex = #/<UpdateVariable>[\s\S]*$/#.ignoresCase()
+        let statusPlaceholderRegex = #/<StatusPlaceHolderImpl[^>]*>[\s\S]*?</StatusPlaceHolderImpl>/#.ignoresCase()
+        let statusPlaceholderSelfClosingRegex = #/<StatusPlaceHolderImpl\s*/?>/#.ignoresCase()
+        let commentClosedRegex = #/<comment>[\s\S]*?</comment>/#.ignoresCase()
+        let commentOpenRegex = #/<comment>[\s\S]*$/#.ignoresCase()
+
         var reasoningParts: [String] = []
         let trimmedExplicit = explicitReasoning.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedExplicit.isEmpty {
