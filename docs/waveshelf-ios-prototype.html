@@ -1,0 +1,3460 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Relay × 鸣潮助手 iOS 26 原生布局原型</title>
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem('waveshelf-proto-theme') || 'system';
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        if (saved === 'light' || saved === 'dark') {
+          if (meta) meta.setAttribute('content', saved);
+          document.documentElement.dataset.theme = saved;
+        } else {
+          if (meta) meta.setAttribute('content', 'light dark');
+          document.documentElement.dataset.theme = 'system';
+        }
+      } catch (e) {}
+    })();
+  </script>
+  <style>
+    @property --fade-start {
+      syntax: "<length>";
+      inherits: false;
+      initial-value: 0px;
+    }
+    @property --fade-end {
+      syntax: "<length>";
+      inherits: false;
+      initial-value: 0px;
+    }
+
+    :root {
+      color-scheme: light dark;
+      &:has(> head > meta[name="color-scheme"][content="dark"]) { color-scheme: dark; }
+      &:has(> head > meta[name="color-scheme"][content="light"]) { color-scheme: light; }
+
+      --font-display: "New York", "Songti SC", "STSong", "Noto Serif SC", Georgia, serif;
+      --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+
+      --canvas: light-dark(#F5F3EF, #0A0A0E);
+      --canvas-deep: light-dark(#EDEAE4, #050507);
+      --studio-bg: light-dark(#E8E4DC, #050507);
+      --surface: light-dark(#FFFFFF, #15151B);
+      --surface-raised: light-dark(#FBFAF8, #1C1C24);
+      --surface-tinted: light-dark(rgba(22, 22, 26, 0.032), rgba(255, 255, 255, 0.045));
+      --hairline: light-dark(rgba(0, 0, 0, 0.08), rgba(255, 255, 255, 0.09));
+      --hairline-strong: light-dark(rgba(0, 0, 0, 0.14), rgba(255, 255, 255, 0.17));
+      --text-primary: light-dark(#16161A, #F2F1EE);
+      --text-secondary: light-dark(#6B6A72, #9C9CA8);
+      --text-tertiary: light-dark(#9E9DA5, #6A6A76);
+      --field-fill: light-dark(rgba(0, 0, 0, 0.048), rgba(255, 255, 255, 0.07));
+      --glass-bg: light-dark(rgba(255, 255, 255, 0.76), rgba(24, 24, 32, 0.78));
+      --glass-border: light-dark(rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.15));
+      --accent: light-dark(#1D1D24, #F2F1EE);
+      --accent-ink: light-dark(#FFFFFF, #111116);
+
+      --ok: light-dark(#1F9D6B, #5FD8A0);
+      --ok-soft: light-dark(rgba(31, 157, 107, 0.12), rgba(95, 216, 160, 0.16));
+      --warn: light-dark(#C27C12, #F3BE6E);
+      --warn-soft: light-dark(rgba(194, 124, 18, 0.12), rgba(243, 190, 110, 0.16));
+      --danger: light-dark(#D1393F, #FF6B6E);
+      --danger-soft: light-dark(rgba(209, 57, 63, 0.12), rgba(255, 107, 110, 0.16));
+
+      --el-glacio: #2B93CF;
+      --el-fusion: #DC5232;
+      --el-electro: #8A50CF;
+      --el-aero: #16A077;
+      --el-spectro: #BE9010;
+      --el-havoc: #AE3670;
+
+      --shadow-card: light-dark(0 1px 2px rgba(0, 0, 0, 0.03), 0 1px 2px rgba(0, 0, 0, 0.35));
+      --shadow-glass: light-dark(0 10px 28px rgba(0, 0, 0, 0.09), 0 12px 32px rgba(0, 0, 0, 0.5));
+      --shadow-device: light-dark(0 28px 68px rgba(22, 22, 26, 0.16), 0 28px 72px rgba(0, 0, 0, 0.72));
+    }
+
+    :root[data-theme="dark"] { color-scheme: dark; }
+    :root[data-theme="light"] { color-scheme: light; }
+
+    * {
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      font-family: var(--font-sans);
+      color: var(--text-primary);
+      background: var(--studio-bg);
+      min-height: 100%;
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button, select, input {
+      font-family: inherit;
+      color: inherit;
+    }
+
+    button {
+      cursor: pointer;
+      border: 0;
+      background: none;
+      padding: 0;
+    }
+
+    .num {
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* 桌面控制顶栏 */
+    .studio-bar {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 24px;
+      background: var(--glass-bg);
+      backdrop-filter: blur(22px) saturate(180%);
+      -webkit-backdrop-filter: blur(22px) saturate(180%);
+      border-bottom: 1px solid var(--hairline);
+    }
+
+    .studio-brand {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .studio-brand-title {
+      font-family: var(--font-display);
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      white-space: nowrap;
+    }
+
+    .studio-brand-sub {
+      font-size: 12px;
+      color: var(--text-secondary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .studio-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .seg-group {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px;
+      border-radius: 999px;
+      background: var(--field-fill);
+      border: 1px solid var(--hairline);
+      gap: 2px;
+    }
+
+    .seg-btn {
+      padding: 5px 11px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      transition: background-color 0.18s ease, color 0.18s ease;
+      white-space: nowrap;
+    }
+
+    .seg-btn[aria-pressed="true"],
+    .seg-btn.is-active {
+      background: var(--surface);
+      color: var(--text-primary);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+    }
+
+    .spec-toggle-btn {
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+      background: var(--surface);
+      border: 1px solid var(--hairline-strong);
+      color: var(--text-primary);
+      transition: background-color 0.18s ease, border-color 0.18s ease;
+      white-space: nowrap;
+    }
+
+    .spec-toggle-btn[aria-pressed="true"] {
+      background: var(--accent);
+      color: var(--accent-ink);
+      border-color: transparent;
+    }
+
+    /* 工作台主区 */
+    .studio-stage {
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      gap: 32px;
+      padding: 24px 24px 40px;
+      max-width: 1280px;
+      margin: 0 auto;
+    }
+
+    /* iPhone 16/17 Pro 画框 */
+    .device-shell {
+      position: relative;
+      width: 414px;
+      flex: 0 0 414px;
+      padding: 12px;
+      border-radius: 54px;
+      background: light-dark(#1C1C21, #191920);
+      box-shadow: var(--shadow-device), inset 0 0 0 2px rgba(255, 255, 255, 0.14);
+    }
+
+    .device-screen {
+      position: relative;
+      width: 390px;
+      height: 844px;
+      border-radius: 42px;
+      background: var(--canvas);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      isolation: isolate;
+    }
+
+    /* iOS 状态栏与灵动岛 */
+    .ios-statusbar {
+      flex: 0 0 auto;
+      height: 48px;
+      padding: 12px 24px 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-primary);
+      background: var(--canvas);
+      position: relative;
+      z-index: 10;
+    }
+
+    .dynamic-island {
+      position: absolute;
+      left: 50%;
+      top: 10px;
+      transform: translateX(-50%);
+      width: 112px;
+      height: 30px;
+      border-radius: 20px;
+      background: #08080B;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+      pointer-events: none;
+    }
+
+    .status-icons {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* 手机滚动容器 */
+    .phone-scroll {
+      flex: 1 1 auto;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding-bottom: 102px;
+      scrollbar-width: none;
+    }
+
+    .phone-scroll::-webkit-scrollbar {
+      display: none;
+    }
+
+    /* Relay 编辑式顶栏 */
+    .app-header {
+      padding: 6px 18px 10px;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .app-title {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: 31px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+    }
+
+    .app-subtitle {
+      margin: 4px 0 0;
+      font-size: 12px;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-top: 2px;
+    }
+
+    .glass-icon-btn {
+      width: 36px;
+      height: 36px;
+      border-radius: 999px;
+      background: var(--glass-bg);
+      backdrop-filter: blur(18px) saturate(180%);
+      -webkit-backdrop-filter: blur(18px) saturate(180%);
+      border: 1px solid var(--glass-border);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-primary);
+      transition: transform 0.16s ease, background-color 0.16s ease;
+    }
+
+    .glass-icon-btn:active {
+      transform: scale(0.93);
+    }
+
+    .mobile-theme-btn {
+      display: none;
+    }
+
+    .is-spinning svg {
+      animation: spin360 0.7s ease-in-out;
+    }
+
+    @keyframes spin360 {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
+    /* 吸顶 4 模块分段导航 (<nav>, 非 tablist) */
+    .section-nav-wrap {
+      position: sticky;
+      top: 0;
+      z-index: 15;
+      padding: 6px 16px 10px;
+      background: linear-gradient(to bottom, var(--canvas) 78%, transparent);
+    }
+
+    .section-nav {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      padding: 3px;
+      border-radius: 14px;
+      background: var(--field-fill);
+      border: 1px solid var(--hairline);
+    }
+
+    .section-nav-btn {
+      position: relative;
+      z-index: 1;
+      height: 32px;
+      border-radius: 11px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      transition: color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease;
+    }
+
+    .section-nav-btn[aria-current="page"] {
+      background: var(--surface);
+      color: var(--text-primary);
+      font-weight: 600;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+    }
+
+    /* 视图容器 */
+    .view-pane {
+      display: none;
+      padding: 4px 16px 16px;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .view-pane.is-active {
+      display: flex;
+    }
+
+    /* Relay 卡片规范: 非玻璃表面 + 细边 + 无嵌套卡片框 */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      border-radius: 22px;
+      padding: 16px;
+      box-shadow: var(--shadow-card);
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .card-title {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .link-action {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      padding: 3px 4px;
+    }
+
+    .link-action:hover {
+      color: var(--text-primary);
+    }
+
+    .hairline-divider {
+      height: 1px;
+      background: var(--hairline);
+      margin: 12px 0;
+    }
+
+    /* 语义胶囊: 仅用于真实数据状态或可交互按钮 */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .badge-ok { background: var(--ok-soft); color: var(--ok); }
+    .badge-warn { background: var(--warn-soft); color: var(--warn); }
+    .badge-danger { background: var(--danger-soft); color: var(--danger); }
+    .badge-neutral { background: var(--field-fill); color: var(--text-secondary); }
+
+    /* 视图1: 总览 */
+    .waveplate-top {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .waveplate-value {
+      font-family: var(--font-display);
+      font-size: 36px;
+      font-weight: 700;
+      line-height: 1;
+      letter-spacing: -0.02em;
+    }
+
+    .waveplate-cap {
+      font-family: var(--font-sans);
+      font-size: 15px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      margin-left: 2px;
+    }
+
+    .waveplate-meta {
+      text-align: right;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .waveplate-meta strong {
+      display: block;
+      color: var(--text-primary);
+      font-weight: 600;
+      margin-bottom: 2px;
+    }
+
+    .progress-track {
+      position: relative;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--field-fill);
+      overflow: visible;
+      margin: 14px 0 10px;
+    }
+
+    .progress-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #2B93CF, #16A077);
+      transition: width 0.3s ease;
+    }
+
+    .progress-tick {
+      position: absolute;
+      top: -3px;
+      bottom: -3px;
+      width: 2px;
+      border-radius: 2px;
+      background: var(--text-primary);
+      opacity: 0.45;
+    }
+
+    .switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    /* 原生 iOS Switch */
+    .ios-switch {
+      position: relative;
+      width: 42px;
+      height: 24px;
+      border-radius: 999px;
+      background: light-dark(rgba(0, 0, 0, 0.16), rgba(255, 255, 255, 0.2));
+      transition: background-color 0.2s ease;
+      flex: 0 0 auto;
+    }
+
+    .ios-switch[aria-checked="true"] {
+      background: var(--ok);
+    }
+
+    .ios-switch-thumb {
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 20px;
+      height: 20px;
+      border-radius: 999px;
+      background: #FFFFFF;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+      transition: transform 0.2s ease;
+    }
+
+    .ios-switch[aria-checked="true"] .ios-switch-thumb {
+      transform: translateX(18px);
+    }
+
+    .metrics-3col {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .metric-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .metric-cell + .metric-cell {
+      border-left: 1px solid var(--hairline);
+      padding-left: 10px;
+    }
+
+    .metric-label {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    .metric-val {
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    /* 签到条 */
+    .checkin-card {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .checkin-info h3 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .checkin-info p {
+      margin: 3px 0 0;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .cta-pill {
+      padding: 8px 14px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      background: var(--accent);
+      color: var(--accent-ink);
+      white-space: nowrap;
+      transition: transform 0.14s ease, background-color 0.2s ease, color 0.2s ease;
+    }
+
+    .cta-pill:active {
+      transform: scale(0.96);
+    }
+
+    .cta-pill.is-done {
+      background: var(--ok-soft);
+      color: var(--ok);
+    }
+
+    /* 列表行 */
+    .list-row {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      padding: 10px 0;
+    }
+
+    .list-row + .list-row {
+      border-top: 1px solid var(--hairline);
+    }
+
+    .list-row:first-child { padding-top: 2px; }
+    .list-row:last-child { padding-bottom: 2px; }
+
+    .list-row-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 13px;
+    }
+
+    .mini-bar {
+      height: 5px;
+      border-radius: 999px;
+      background: var(--field-fill);
+      overflow: hidden;
+    }
+
+    .mini-bar > span {
+      display: block;
+      height: 100%;
+      border-radius: 999px;
+    }
+
+    /* 主力横滑条 */
+    .h-strip {
+      display: flex;
+      gap: 10px;
+      overflow-x: auto;
+      margin: 0 -4px;
+      padding: 2px 4px 4px;
+      scrollbar-width: none;
+    }
+
+    .h-strip::-webkit-scrollbar { display: none; }
+
+    .quick-res-card {
+      flex: 0 0 132px;
+      text-align: left;
+      padding: 12px;
+      border-radius: 18px;
+      background: var(--surface-tinted);
+      border: 1px solid var(--hairline);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: transform 0.16s ease, border-color 0.16s ease;
+    }
+
+    .quick-res-card:active {
+      transform: scale(0.97);
+    }
+
+    .quick-res-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    /* 角色纹章 SVG */
+    .crest {
+      width: 34px;
+      height: 34px;
+      border-radius: 12px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 13px;
+      color: #FFFFFF;
+      flex: 0 0 auto;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* 视图2: 角色列表 */
+    .filter-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .filter-scroll {
+      flex: 1 1 auto;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      overflow-x: auto;
+      scrollbar-width: none;
+      padding: 2px 0;
+    }
+
+    .filter-scroll::-webkit-scrollbar { display: none; }
+
+    .chip-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      color: var(--text-secondary);
+      white-space: nowrap;
+      transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+    }
+
+    .chip-btn[aria-pressed="true"] {
+      background: var(--accent);
+      color: var(--accent-ink);
+      border-color: transparent;
+    }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      display: inline-block;
+    }
+
+    .compact-select {
+      flex: 0 0 auto;
+      height: 30px;
+      padding: 0 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+      background: var(--surface);
+      border: 1px solid var(--hairline-strong);
+      color: var(--text-primary);
+    }
+
+    .res-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+
+    .res-card {
+      position: relative;
+      text-align: left;
+      padding: 13px;
+      border-radius: 20px;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      box-shadow: var(--shadow-card);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      overflow: hidden;
+      transition: transform 0.16s ease, border-color 0.16s ease;
+    }
+
+    .res-card:active {
+      transform: scale(0.97);
+    }
+
+    .res-card-wash {
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 44px;
+      opacity: 0.14;
+      pointer-events: none;
+    }
+
+    .res-card-head {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      position: relative;
+    }
+
+    .res-name {
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 1.2;
+    }
+
+    .res-sub {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-top: 2px;
+    }
+
+    .res-weapon {
+      font-size: 11px;
+      color: var(--text-secondary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .res-card-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-top: 8px;
+      border-top: 1px solid var(--hairline);
+    }
+
+    .res-score-val {
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    /* Modern Web Guidance: ARIA Tabs (用于页内标签切换，不用于页面导航) */
+    [role="tablist"] {
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      overflow-x: auto;
+      scrollbar-width: none;
+      border-bottom: 1px solid var(--hairline);
+      --fade-start: 0px;
+      --fade-end: 0px;
+      mask-image: linear-gradient(
+        to right,
+        transparent,
+        #000 var(--fade-start),
+        #000 calc(100% - var(--fade-end)),
+        transparent
+      );
+      -webkit-mask-image: linear-gradient(
+        to right,
+        transparent,
+        #000 var(--fade-start),
+        #000 calc(100% - var(--fade-end)),
+        transparent
+      );
+      transition: --fade-start 0.2s ease, --fade-end 0.2s ease;
+    }
+
+    [role="tablist"]::-webkit-scrollbar {
+      display: none;
+    }
+
+    [role="tab"] {
+      position: relative;
+      flex: 0 0 auto;
+      padding: 9px 11px 10px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      white-space: nowrap;
+      transition: color 0.16s ease;
+    }
+
+    [role="tab"][aria-selected="true"] {
+      color: var(--text-primary);
+      font-weight: 600;
+    }
+
+    /* 选中指示器使用形状(下边框)而非仅靠颜色，符合 WCAG 1.4.1 与 forced-colors */
+    [role="tab"][aria-selected="true"]::after {
+      content: "";
+      position: absolute;
+      left: 8px;
+      right: 8px;
+      bottom: 0;
+      border-block-end: 2.5px solid var(--text-primary);
+      border-radius: 2px;
+    }
+
+    /* 严格不在 [role="tabpanel"] 本体上加 padding/border/margin/background */
+    [role="tabpanel"] {
+      display: block;
+    }
+
+    [role="tabpanel"][hidden="until-found"] {
+      content-visibility: hidden;
+      height: 0;
+      overflow: hidden;
+    }
+
+    .tabpanel-inner {
+      padding-top: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    /* 视图3: 唤取 */
+    .pill-row {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .pill-row::-webkit-scrollbar { display: none; }
+
+    .pity-hero {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .ring-wrap {
+      position: relative;
+      width: 96px;
+      height: 96px;
+      flex: 0 0 96px;
+    }
+
+    .ring-center {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .ring-big {
+      font-family: var(--font-display);
+      font-size: 24px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .ring-sub {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-top: 2px;
+    }
+
+    .pity-summary {
+      flex: 1 1 auto;
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px 12px;
+    }
+
+    .pull-item {
+      display: grid;
+      grid-template-columns: 76px 1fr auto;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 0;
+      font-size: 12px;
+    }
+
+    .pull-item + .pull-item {
+      border-top: 1px solid var(--hairline);
+    }
+
+    .pull-bar-bg {
+      height: 18px;
+      border-radius: 6px;
+      background: var(--field-fill);
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+    }
+
+    .pull-bar-fill {
+      height: 100%;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      padding-right: 6px;
+      color: #FFFFFF;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .slider-block {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .slider-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 13px;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--text-primary);
+      margin: 0;
+    }
+
+    .gauge-box {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 4px 0;
+    }
+
+    .gauge-readout {
+      margin-top: -22px;
+      text-align: center;
+    }
+
+    .gauge-pct {
+      font-family: var(--font-display);
+      font-size: 32px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    /* 视图4: 伤害计算实验室 */
+    .team-preset-strip {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .team-preset-strip::-webkit-scrollbar { display: none; }
+
+    .preset-btn {
+      flex: 0 0 auto;
+      padding: 8px 12px;
+      border-radius: 14px;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+    }
+
+    .preset-btn[aria-pressed="true"] {
+      background: var(--accent);
+      color: var(--accent-ink);
+      border-color: transparent;
+      font-weight: 600;
+    }
+
+    .calc-cond-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .dpr-hero-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .dpr-number {
+      font-family: var(--font-display);
+      font-size: 34px;
+      font-weight: 700;
+      line-height: 1.05;
+      letter-spacing: -0.02em;
+    }
+
+    .dpr-subrow {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 6px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .stack-bar {
+      height: 10px;
+      border-radius: 999px;
+      overflow: hidden;
+      display: flex;
+      gap: 2px;
+      margin: 14px 0 10px;
+      background: var(--field-fill);
+    }
+
+    .stack-seg {
+      height: 100%;
+      transition: width 0.25s ease;
+    }
+
+    .share-cols {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .share-member {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .share-member-name {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .share-member-meta {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    .spark-wrap {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--hairline);
+    }
+
+    .spark-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+    }
+
+    .callout-warn {
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: var(--warn-soft);
+      color: var(--text-primary);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .callout-warn strong {
+      color: var(--warn);
+    }
+
+    .champion-box {
+      padding: 14px;
+      border-radius: 18px;
+      background: var(--surface-tinted);
+      border: 1px solid var(--hairline-strong);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .champion-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .champion-path {
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .sandbox-grid {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 4px;
+    }
+
+    .chain-btn {
+      position: relative;
+      height: 36px;
+      border-radius: 10px;
+      background: var(--field-fill);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      transition: background-color 0.16s ease, color 0.16s ease;
+    }
+
+    .chain-btn[aria-pressed="true"] {
+      background: var(--accent);
+      color: var(--accent-ink);
+    }
+
+    .chain-btn.is-baseline::after {
+      content: "";
+      position: absolute;
+      bottom: 3px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 4px;
+      height: 4px;
+      border-radius: 999px;
+      background: var(--ok);
+    }
+
+    .refine-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 6px;
+    }
+
+    .bar-row {
+      display: grid;
+      grid-template-columns: 88px 1fr 56px;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+    }
+
+    .grad-scale {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 4px;
+      margin: 10px 0 6px;
+    }
+
+    .grad-tier {
+      padding: 6px 4px;
+      border-radius: 10px;
+      text-align: center;
+      font-size: 11px;
+      background: var(--field-fill);
+      color: var(--text-secondary);
+    }
+
+    .grad-tier.is-current {
+      background: var(--ok-soft);
+      color: var(--ok);
+      font-weight: 600;
+    }
+
+    /* 可展开轮切动作明细 */
+    details.rotation-details summary {
+      list-style: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    details.rotation-details summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .step-row {
+      width: 100%;
+      text-align: left;
+      padding: 10px 4px;
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      align-items: center;
+      gap: 10px;
+      border-top: 1px solid var(--hairline);
+      transition: background-color 0.14s ease;
+    }
+
+    .step-row:first-of-type {
+      margin-top: 10px;
+    }
+
+    .step-row:active {
+      background: var(--field-fill);
+    }
+
+    /* Relay 底部悬浮 Liquid Glass 3-Tab 栏 */
+    .bottom-dock {
+      position: absolute;
+      left: 14px;
+      right: 14px;
+      bottom: 14px;
+      z-index: 20;
+      padding: 5px;
+      border-radius: 30px;
+      background: var(--glass-bg);
+      backdrop-filter: blur(26px) saturate(190%);
+      -webkit-backdrop-filter: blur(26px) saturate(190%);
+      border: 1px solid var(--glass-border);
+      box-shadow: var(--shadow-glass);
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+    }
+
+    .dock-tab {
+      height: 50px;
+      border-radius: 25px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      transition: background-color 0.18s ease, color 0.18s ease;
+    }
+
+    .dock-tab[aria-current="page"] {
+      background: light-dark(rgba(0, 0, 0, 0.065), rgba(255, 255, 255, 0.12));
+      color: var(--text-primary);
+      font-weight: 600;
+    }
+
+    /* 原生 <dialog> Bottom Sheet (遵循 light-dismiss-a-dialog) */
+    dialog.ios-sheet {
+      width: min(390px, calc(100vw - 16px));
+      max-height: 82dvh;
+      margin: auto auto 12px;
+      padding: 0;
+      border: 1px solid var(--hairline-strong);
+      border-radius: 28px;
+      background: var(--surface);
+      color: var(--text-primary);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.36);
+      overflow: hidden;
+    }
+
+    dialog.ios-sheet::backdrop {
+      background: rgba(10, 10, 14, 0.45);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+    }
+
+    .sheet-inner {
+      max-height: 82dvh;
+      overflow-y: auto;
+      padding: 10px 18px 22px;
+    }
+
+    .sheet-grabber {
+      width: 38px;
+      height: 4px;
+      border-radius: 999px;
+      background: var(--hairline-strong);
+      margin: 0 auto 12px;
+    }
+
+    .sheet-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .sheet-title {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    .close-btn {
+      width: 30px;
+      height: 30px;
+      border-radius: 999px;
+      background: var(--field-fill);
+      color: var(--text-secondary);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+      flex: 0 0 auto;
+    }
+
+    .stat-table {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px 12px;
+      padding: 12px 0;
+      border-top: 1px solid var(--hairline);
+      border-bottom: 1px solid var(--hairline);
+      margin-bottom: 12px;
+    }
+
+    .chain-strip {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 6px;
+      margin: 10px 0 14px;
+    }
+
+    .chain-node {
+      height: 28px;
+      border-radius: 8px;
+      background: var(--field-fill);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-tertiary);
+    }
+
+    .chain-node.is-on {
+      color: #FFFFFF;
+    }
+
+    .echo-row {
+      padding: 10px 0;
+      border-top: 1px solid var(--hairline);
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .echo-subs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 10px;
+      font-size: 11px;
+    }
+
+    .sub-core { color: var(--ok); font-weight: 600; }
+    .sub-useful { color: var(--text-primary); }
+    .sub-dead { color: var(--text-tertiary); }
+
+    /* Toast */
+    .phone-toast {
+      position: absolute;
+      top: 56px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-10px);
+      z-index: 35;
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: var(--accent);
+      color: var(--accent-ink);
+      font-size: 12px;
+      font-weight: 500;
+      white-space: nowrap;
+      opacity: 0;
+      pointer-events: none;
+      box-shadow: 0 8px 22px rgba(0, 0, 0, 0.22);
+      transition: opacity 0.2s ease, transform 0.2s ease;
+    }
+
+    .phone-toast.is-visible {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    /* 右侧原生 SwiftUI 映射说明面板 */
+    .spec-panel {
+      width: 340px;
+      flex: 0 0 340px;
+      background: var(--surface);
+      border: 1px solid var(--hairline);
+      border-radius: 22px;
+      padding: 18px;
+      box-shadow: var(--shadow-card);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .spec-panel[hidden] {
+      display: none;
+    }
+
+    .spec-panel h2 {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .spec-item {
+      padding-top: 10px;
+      border-top: 1px solid var(--hairline);
+      font-size: 12.5px;
+      line-height: 1.55;
+      color: var(--text-secondary);
+    }
+
+    .spec-item strong {
+      display: block;
+      color: var(--text-primary);
+      margin-bottom: 3px;
+      font-size: 13px;
+    }
+
+    /* 小屏手机铺满视口 */
+    @media (max-width: 639px) {
+      body {
+        background: var(--canvas);
+      }
+      .studio-bar,
+      .spec-panel,
+      .ios-statusbar,
+      .dynamic-island {
+        display: none !important;
+      }
+      .studio-stage {
+        padding: 0;
+        display: block;
+      }
+      .device-shell {
+        width: 100%;
+        padding: 0;
+        border-radius: 0;
+        background: none;
+        box-shadow: none;
+      }
+      .device-screen {
+        width: 100%;
+        height: 100dvh;
+        border-radius: 0;
+      }
+      .mobile-theme-btn {
+        display: inline-flex;
+      }
+    }
+
+    @media (max-width: 1119px) {
+      .spec-panel {
+        display: none !important;
+      }
+      .spec-toggle-btn {
+        display: none;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="studio-bar">
+    <div class="studio-brand">
+      <span class="studio-brand-title">Relay × 鸣潮 iOS 26 原型</span>
+      <span class="studio-brand-sub">100% 原生 SwiftUI + Liquid Glass + Swift Charts 布局设计</span>
+    </div>
+    <div class="studio-controls">
+      <div class="seg-group" aria-label="快速切换原型页面">
+        <button type="button" class="seg-btn is-active" data-studio-view="home">总览</button>
+        <button type="button" class="seg-btn" data-studio-view="roles">角色</button>
+        <button type="button" class="seg-btn" data-studio-view="gacha">唤取</button>
+        <button type="button" class="seg-btn" data-studio-view="calc">伤害计算</button>
+      </div>
+      <div class="seg-group" role="group" aria-label="外观模式切换">
+        <button type="button" class="seg-btn" data-theme-choice="system" aria-pressed="true">跟随系统</button>
+        <button type="button" class="seg-btn" data-theme-choice="light" aria-pressed="false">浅色</button>
+        <button type="button" class="seg-btn" data-theme-choice="dark" aria-pressed="false">深色</button>
+      </div>
+      <button type="button" class="spec-toggle-btn" id="toggle-spec-btn" aria-pressed="true">SwiftUI 映射说明</button>
+    </div>
+  </header>
+
+  <main class="studio-stage">
+    <div class="device-shell">
+      <div class="device-screen" id="phone-viewport">
+        <div class="phone-toast" id="phone-toast" role="status" aria-live="polite"></div>
+
+        <!-- iOS 状态栏 -->
+        <div class="ios-statusbar" aria-hidden="true">
+          <span class="num">9:41</span>
+          <div class="dynamic-island"></div>
+          <div class="status-icons">
+            <svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor">
+              <rect x="0" y="7" width="2.6" height="4" rx="0.8"/>
+              <rect x="4" y="5" width="2.6" height="6" rx="0.8"/>
+              <rect x="8" y="2.5" width="2.6" height="8.5" rx="0.8"/>
+              <rect x="12" y="0" width="2.6" height="11" rx="0.8"/>
+            </svg>
+            <svg width="15" height="11" viewBox="0 0 15 11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+              <path d="M1.5 3.6a8.8 8.8 0 0 1 12 0"/>
+              <path d="M4 6.4a5.3 5.3 0 0 1 7 0"/>
+              <circle cx="7.5" cy="9.2" r="1.1" fill="currentColor" stroke="none"/>
+            </svg>
+            <svg width="24" height="12" viewBox="0 0 24 12" fill="none">
+              <rect x="0.7" y="1.2" width="19.6" height="9.6" rx="2.6" stroke="currentColor" stroke-opacity="0.4"/>
+              <rect x="2.2" y="2.7" width="15.2" height="6.6" rx="1.5" fill="currentColor"/>
+              <path d="M21.6 4.2v3.6a1.4 1.4 0 0 0 0-3.6z" fill="currentColor" fill-opacity="0.45"/>
+            </svg>
+          </div>
+        </div>
+
+        <div class="phone-scroll" id="phone-scroll">
+          <!-- Relay 编辑式顶栏 -->
+          <header class="app-header">
+            <div>
+              <h1 class="app-title">鸣潮</h1>
+              <p class="app-subtitle num">
+                <span>UID 104829316</span>
+                <span>·</span>
+                <span>官服</span>
+                <span>·</span>
+                <span id="sync-time-label">刚刚同步</span>
+              </p>
+            </div>
+            <div class="header-actions">
+              <button type="button" class="glass-icon-btn mobile-theme-btn" id="mobile-theme-cycle" aria-label="切换深浅色主题" title="切换深浅色">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="4"/>
+                  <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+                </svg>
+              </button>
+              <button type="button" class="glass-icon-btn" id="sync-btn" aria-label="刷新鸣潮数据">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 12a9 9 0 0 0-15.5-6.3L3 8"/>
+                  <path d="M3 3v5h5"/>
+                  <path d="M3 12a9 9 0 0 0 15.5 6.3L21 16"/>
+                  <path d="M16 16h5v5"/>
+                </svg>
+              </button>
+              <button type="button" class="glass-icon-btn" id="account-btn" aria-label="账号与离线备份管理">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="8" r="4"/>
+                  <path d="M4.5 20a7.5 7.5 0 0 1 15 0"/>
+                </svg>
+              </button>
+            </div>
+          </header>
+
+          <!-- 吸顶 4 模块主导航 (语义为页面导航 <nav>) -->
+          <div class="section-nav-wrap">
+            <nav class="section-nav" aria-label="鸣潮模块导航">
+              <button type="button" class="section-nav-btn" data-view="home" aria-current="page">总览</button>
+              <button type="button" class="section-nav-btn" data-view="roles">角色</button>
+              <button type="button" class="section-nav-btn" data-view="gacha">唤取</button>
+              <button type="button" class="section-nav-btn" data-view="calc">伤害计算</button>
+            </nav>
+          </div>
+
+          <!-- 视图 1: 总览 -->
+          <section class="view-pane is-active" id="view-home" aria-label="总览">
+            <div class="card">
+              <div class="waveplate-top">
+                <div>
+                  <div class="metric-label">结晶波片</div>
+                  <div class="waveplate-value num">198<span class="waveplate-cap">/ 240</span></div>
+                </div>
+                <div class="waveplate-meta num">
+                  <strong>4时12分后回满</strong>
+                  <span>预计今晚 21:01 满额</span>
+                </div>
+              </div>
+              <div class="progress-track" aria-label="波片进度 198 / 240">
+                <div class="progress-fill" style="width: 82.5%;"></div>
+                <div class="progress-tick" style="left: 83.3%;" title="阈值 200"></div>
+              </div>
+              <div class="switch-row">
+                <span>达到 200 推送本地提醒</span>
+                <button type="button" class="ios-switch" id="waveplate-alert-switch" role="switch" aria-checked="true" aria-label="达到 200 推送本地提醒">
+                  <span class="ios-switch-thumb"></span>
+                </button>
+              </div>
+              <div class="hairline-divider"></div>
+              <div class="metrics-3col num">
+                <div class="metric-cell">
+                  <span class="metric-label">每日活跃度</span>
+                  <span class="metric-val">100 / 100</span>
+                </div>
+                <div class="metric-cell">
+                  <span class="metric-label">先约电台</span>
+                  <span class="metric-val">Lv.58</span>
+                </div>
+                <div class="metric-cell">
+                  <span class="metric-label">结晶单质</span>
+                  <span class="metric-val">360</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="card checkin-card">
+              <div class="checkin-info">
+                <h3>库街区每日签到</h3>
+                <p id="checkin-desc" class="num">今日奖励：贝币 ×15,000 · 已连签 23 天</p>
+              </div>
+              <button type="button" class="cta-pill" id="checkin-btn">一键签到</button>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <h2 class="card-title">唤取水位速览</h2>
+                <button type="button" class="link-action" data-jump-view="gacha">明细 &rsaquo;</button>
+              </div>
+              <div class="list-row">
+                <div class="list-row-head">
+                  <span>角色活动唤取</span>
+                  <span class="num">54 / 80 <span class="badge badge-warn">大保底</span></span>
+                </div>
+                <div class="mini-bar"><span style="width: 67.5%; background: var(--warn);"></span></div>
+              </div>
+              <div class="list-row">
+                <div class="list-row-head">
+                  <span>武器活动唤取</span>
+                  <span class="num">22 / 80 <span class="badge badge-neutral">小保底</span></span>
+                </div>
+                <div class="mini-bar"><span style="width: 27.5%; background: var(--el-glacio);"></span></div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <h2 class="card-title">主力共鸣者</h2>
+                <button type="button" class="link-action" data-jump-view="roles">全部 8 位 &rsaquo;</button>
+              </div>
+              <div class="h-strip" id="home-top-resonators"></div>
+            </div>
+          </section>
+
+          <!-- 视图 2: 角色 -->
+          <section class="view-pane" id="view-roles" aria-label="角色列表">
+            <div class="filter-toolbar">
+              <div class="filter-scroll" id="element-filters" role="group" aria-label="按属性筛选">
+                <button type="button" class="chip-btn" data-el="all" aria-pressed="true">全部</button>
+                <button type="button" class="chip-btn" data-el="fusion" aria-pressed="false"><span class="dot" style="background: var(--el-fusion);"></span>热熔</button>
+                <button type="button" class="chip-btn" data-el="havoc" aria-pressed="false"><span class="dot" style="background: var(--el-havoc);"></span>湮灭</button>
+                <button type="button" class="chip-btn" data-el="spectro" aria-pressed="false"><span class="dot" style="background: var(--el-spectro);"></span>衍射</button>
+                <button type="button" class="chip-btn" data-el="glacio" aria-pressed="false"><span class="dot" style="background: var(--el-glacio);"></span>冷凝</button>
+                <button type="button" class="chip-btn" data-el="aero" aria-pressed="false"><span class="dot" style="background: var(--el-aero);"></span>气动</button>
+                <button type="button" class="chip-btn" data-el="electro" aria-pressed="false"><span class="dot" style="background: var(--el-electro);"></span>导电</button>
+              </div>
+              <select class="compact-select" id="role-sort-select" aria-label="角色排序方式">
+                <option value="score">按声骸分</option>
+                <option value="chain">按共鸣链</option>
+                <option value="level">按等级</option>
+              </select>
+            </div>
+            <div class="res-grid" id="roles-grid"></div>
+          </section>
+
+          <!-- 视图 3: 唤取 -->
+          <section class="view-pane" id="view-gacha" aria-label="唤取与星声规划">
+            <div class="card">
+              <div role="tablist" focusgroup="tablist nomemory" aria-label="唤取功能切换">
+                <button type="button" role="tab" id="gacha-tab-history" aria-selected="true">出货记录</button>
+                <button type="button" role="tab" id="gacha-tab-planner" aria-selected="false">星声规划</button>
+              </div>
+
+              <div role="tabpanel" id="gacha-panel-history" aria-labelledby="gacha-tab-history">
+                <div class="tabpanel-inner">
+                  <div class="pill-row" id="gacha-pool-pills" role="group" aria-label="卡池切换">
+                    <button type="button" class="chip-btn" data-pool="charEvent" aria-pressed="true">角色活动</button>
+                    <button type="button" class="chip-btn" data-pool="weapEvent" aria-pressed="false">武器活动</button>
+                    <button type="button" class="chip-btn" data-pool="charStd" aria-pressed="false">常驻角色</button>
+                    <button type="button" class="chip-btn" data-pool="weapStd" aria-pressed="false">常驻武器</button>
+                  </div>
+
+                  <div class="pity-hero">
+                    <div class="ring-wrap">
+                      <svg width="96" height="96" viewBox="0 0 96 96">
+                        <circle cx="48" cy="48" r="39" fill="none" stroke="var(--field-fill)" stroke-width="8"/>
+                        <circle id="gacha-ring-arc" cx="48" cy="48" r="39" fill="none" stroke="var(--warn)" stroke-width="8" stroke-linecap="round" stroke-dasharray="245" stroke-dashoffset="80" transform="rotate(-90 48 48)"/>
+                      </svg>
+                      <div class="ring-center num">
+                        <span class="ring-big" id="gacha-pity-num">54</span>
+                        <span class="ring-sub">/ 80 抽</span>
+                      </div>
+                    </div>
+                    <div class="pity-summary num">
+                      <div class="metric-cell">
+                        <span class="metric-label">累计总抽</span>
+                        <span class="metric-val" id="gacha-total-pulls">468</span>
+                      </div>
+                      <div class="metric-cell">
+                        <span class="metric-label">五星均抽</span>
+                        <span class="metric-val" id="gacha-avg-pulls">52.0</span>
+                      </div>
+                      <div class="metric-cell">
+                        <span class="metric-label">不歪率</span>
+                        <span class="metric-val" id="gacha-win-rate">66.7%</span>
+                      </div>
+                      <div class="metric-cell">
+                        <span class="metric-label">当前保底</span>
+                        <span id="gacha-guarantee-badge"><span class="badge badge-warn">大保底</span></span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="hairline-divider" style="margin: 4px 0;"></div>
+                  <div id="gacha-history-list"></div>
+                </div>
+              </div>
+
+              <div role="tabpanel" id="gacha-panel-planner" aria-labelledby="gacha-tab-planner" hidden="until-found">
+                <div class="tabpanel-inner">
+                  <div class="gauge-box">
+                    <svg width="210" height="122" viewBox="0 0 210 122">
+                      <path d="M 21 106 A 84 84 0 0 1 189 106" fill="none" stroke="var(--field-fill)" stroke-width="14" stroke-linecap="round"/>
+                      <path id="planner-gauge-arc" d="M 21 106 A 84 84 0 0 1 189 106" fill="none" stroke="var(--ok)" stroke-width="14" stroke-linecap="round" stroke-dasharray="264" stroke-dashoffset="42"/>
+                    </svg>
+                    <div class="gauge-readout num">
+                      <div class="gauge-pct" id="planner-prob-pct">84%</div>
+                      <div class="metric-label" id="planner-summary-line">可用 110 抽 · 已垫 54 抽</div>
+                    </div>
+                  </div>
+
+                  <div class="metrics-3col num" style="padding: 8px 0; border-top: 1px solid var(--hairline); border-bottom: 1px solid var(--hairline);">
+                    <div class="metric-cell">
+                      <span class="metric-label">P50 中位</span>
+                      <span class="metric-val" id="planner-p50">72 抽</span>
+                    </div>
+                    <div class="metric-cell">
+                      <span class="metric-label">P80 稳妥</span>
+                      <span class="metric-val" id="planner-p80">106 抽</span>
+                    </div>
+                    <div class="metric-cell">
+                      <span class="metric-label">P95 保底</span>
+                      <span class="metric-val" id="planner-p95">148 抽</span>
+                    </div>
+                  </div>
+
+                  <div class="slider-block">
+                    <div class="slider-head">
+                      <span>当前星声</span>
+                      <strong class="num" id="plan-astrite-val">14,800 (92 抽)</strong>
+                    </div>
+                    <input type="range" id="plan-astrite" min="0" max="48000" step="160" value="14800">
+                  </div>
+
+                  <div class="slider-block">
+                    <div class="slider-head">
+                      <span>浮金 / 铸潮波纹</span>
+                      <strong class="num" id="plan-tides-val">18 抽</strong>
+                    </div>
+                    <input type="range" id="plan-tides" min="0" max="120" step="1" value="18">
+                  </div>
+
+                  <div class="slider-block">
+                    <div class="slider-head">
+                      <span>当前角色池已垫</span>
+                      <strong class="num" id="plan-pity-val">54 / 80</strong>
+                    </div>
+                    <input type="range" id="plan-pity" min="0" max="79" step="1" value="54">
+                  </div>
+
+                  <div class="switch-row">
+                    <span>当前是大保底</span>
+                    <button type="button" class="ios-switch" id="plan-guarantee-switch" role="switch" aria-checked="true" aria-label="当前是大保底">
+                      <span class="ios-switch-thumb"></span>
+                    </button>
+                  </div>
+
+                  <div>
+                    <div class="metric-label" style="margin-bottom: 6px;">目标配置</div>
+                    <div class="pill-row" id="planner-goal-pills" role="group" aria-label="目标金数档位">
+                      <button type="button" class="chip-btn" data-goal="0+0" aria-pressed="false">0+0 本体</button>
+                      <button type="button" class="chip-btn" data-goal="0+1" aria-pressed="true">0+1 本体专武</button>
+                      <button type="button" class="chip-btn" data-goal="2+1" aria-pressed="false">2+1 二链专武</button>
+                      <button type="button" class="chip-btn" data-goal="6+1" aria-pressed="false">6+1 满链</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- 视图 4: 伤害计算实验室 -->
+          <section class="view-pane" id="view-calc" aria-label="伤害计算实验室">
+            <div class="team-preset-strip" id="calc-presets" role="group" aria-label="配队预设">
+              <button type="button" class="preset-btn" data-team="aemeath" aria-pressed="true">
+                <span class="dot" style="background: var(--el-fusion);"></span>爱弥斯 · 达妮娅 · 莫宁
+              </button>
+              <button type="button" class="preset-btn" data-team="camellya" aria-pressed="false">
+                <span class="dot" style="background: var(--el-havoc);"></span>椿 · 散华 · 守岸人
+              </button>
+              <button type="button" class="preset-btn" data-team="jinhsi" aria-pressed="false">
+                <span class="dot" style="background: var(--el-spectro);"></span>今汐 · 折枝 · 维里奈
+              </button>
+            </div>
+
+            <div class="calc-cond-row">
+              <div class="seg-group" role="group" aria-label="轴模式">
+                <button type="button" class="seg-btn" data-axis="loop" aria-pressed="true">标准循环</button>
+                <button type="button" class="seg-btn" data-axis="burst" aria-pressed="false">首轮爆发</button>
+              </div>
+              <select class="compact-select" id="calc-env-select" aria-label="敌人与环境预设">
+                <option value="tower">深塔 Lv.100 · 全抗 10%</option>
+                <option value="holo">全息 Lv.100 · 抗性 20%</option>
+                <option value="buff">深塔环境 · 增伤 +30%</option>
+              </select>
+            </div>
+
+            <!-- Hero 伤害仪表盘 -->
+            <div class="card">
+              <div class="dpr-hero-top">
+                <div>
+                  <div class="metric-label" id="calc-hero-label">整队轮伤 DPR</div>
+                  <div class="dpr-number num" id="calc-dpr-val">2,486,420</div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px;">
+                  <span class="badge badge-ok" id="calc-delta-badge" hidden>+0.0%</span>
+                  <button type="button" class="chip-btn" id="calc-reset-btn" hidden>还原基准</button>
+                </div>
+              </div>
+              <div class="dpr-subrow num">
+                <span>整队 DPS <strong id="calc-dps-val" style="color: var(--text-primary);">103,601</strong></span>
+                <span>·</span>
+                <span>轴长 <strong id="calc-dur-val" style="color: var(--text-primary);">24.0s</strong></span>
+                <span>·</span>
+                <span>主 C 占比 <strong id="calc-main-share" style="color: var(--text-primary);">76.4%</strong></span>
+              </div>
+
+              <!-- Swift Charts 风格整队伤害占比堆叠条 -->
+              <div class="stack-bar" id="calc-stack-bar" aria-label="整队伤害占比"></div>
+              <div class="share-cols num" id="calc-share-cols"></div>
+
+              <!-- 历史基准对比曲线 -->
+              <div class="spark-wrap">
+                <div class="spark-head">
+                  <span>配装成长曲线 · 持有基准 vs 沙盒预览</span>
+                  <span class="num" id="calc-spark-caption">基准 2,486,420</span>
+                </div>
+                <svg id="calc-sparkline" width="100%" height="58" viewBox="0 0 326 58" preserveAspectRatio="none"></svg>
+              </div>
+            </div>
+
+            <!-- 4 标签实验工作台 (ARIA tablist + hidden="until-found") -->
+            <div class="card">
+              <div role="tablist" focusgroup="tablist nomemory" id="calc-tablist" aria-label="伤害实验工具">
+                <button type="button" role="tab" id="lab-tab-gold" aria-selected="true">下一金建议</button>
+                <button type="button" role="tab" id="lab-tab-sandbox" aria-selected="false">配装沙盒</button>
+                <button type="button" role="tab" id="lab-tab-substat" aria-selected="false">词条与弱声骸</button>
+                <button type="button" role="tab" id="lab-tab-grad" aria-selected="false">毕业与充能</button>
+              </div>
+
+              <!-- Tab 1: 下一金建议 -->
+              <div role="tabpanel" id="lab-panel-gold" aria-labelledby="lab-tab-gold">
+                <div class="tabpanel-inner">
+                  <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                    <span class="metric-label">预算深度</span>
+                    <div class="seg-group" id="gold-budget-group" role="group" aria-label="抽卡预算金数">
+                      <button type="button" class="seg-btn" data-gold="1" aria-pressed="false">+1金</button>
+                      <button type="button" class="seg-btn" data-gold="2" aria-pressed="true">+2金</button>
+                      <button type="button" class="seg-btn" data-gold="3" aria-pressed="false">+3金</button>
+                      <button type="button" class="seg-btn" data-gold="4" aria-pressed="false">+4金</button>
+                    </div>
+                  </div>
+                  <div class="callout-warn" id="gold-trap-note"></div>
+                  <div class="champion-box" id="gold-champion-box"></div>
+                  <div id="gold-alt-list"></div>
+                </div>
+              </div>
+
+              <!-- Tab 2: 配装沙盒 -->
+              <div role="tabpanel" id="lab-panel-sandbox" aria-labelledby="lab-tab-sandbox" hidden="until-found">
+                <div class="tabpanel-inner">
+                  <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                    <span class="metric-label">编辑角色</span>
+                    <div class="seg-group" id="sandbox-slot-group" role="group" aria-label="队伍槽位选择">
+                      <button type="button" class="seg-btn" data-slot="0" aria-pressed="true">1号位</button>
+                      <button type="button" class="seg-btn" data-slot="1" aria-pressed="false">2号位</button>
+                      <button type="button" class="seg-btn" data-slot="2" aria-pressed="false">3号位</button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div class="slider-head" style="margin-bottom: 6px;">
+                      <span id="sb-member-title">爱弥斯 · 共鸣链</span>
+                      <span class="metric-label" id="sb-baseline-hint">绿点为当前持有</span>
+                    </div>
+                    <div class="sandbox-grid num" id="sb-chain-grid" role="group" aria-label="共鸣链数 0 到 6"></div>
+                  </div>
+
+                  <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                    <span style="font-size: 13px;">装备武器</span>
+                    <select class="compact-select" id="sb-weapon-select" aria-label="选择沙盒武器">
+                      <option value="sig">专属五星</option>
+                      <option value="std">常驻五星</option>
+                      <option value="4star">四星满阶</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <div class="slider-head" style="margin-bottom: 6px;">
+                      <span>武器谐振阶数</span>
+                      <span class="metric-label num" id="sb-refine-label">当前 R1</span>
+                    </div>
+                    <div class="refine-grid num" id="sb-refine-grid" role="group" aria-label="武器谐振 1 到 5 阶"></div>
+                  </div>
+
+                  <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                    <span style="font-size: 13px;">声骸主词条组合</span>
+                    <select class="compact-select" id="sb-echo-select" aria-label="选择声骸主词条组合">
+                      <option value="43311_ele">43311 双属伤</option>
+                      <option value="43311_atk">43311 一攻一属</option>
+                      <option value="44111">44111 双暴击</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Tab 3: 词条灵敏度与弱声骸 -->
+              <div role="tabpanel" id="lab-panel-substat" aria-labelledby="lab-tab-substat" hidden="until-found">
+                <div class="tabpanel-inner">
+                  <div class="metric-label">每增加 1 条标准有效副词条的整队收益</div>
+                  <div id="substat-bars" style="display: flex; flex-direction: column; gap: 9px;"></div>
+                  <div class="hairline-divider" style="margin: 4px 0;"></div>
+                  <div id="weak-echo-box"></div>
+                </div>
+              </div>
+
+              <!-- Tab 4: 毕业基准与充能体检 -->
+              <div role="tabpanel" id="lab-panel-grad" aria-labelledby="lab-tab-grad" hidden="until-found">
+                <div class="tabpanel-inner">
+                  <div>
+                    <div class="slider-head">
+                      <span>主 C 声骸毕业度定位</span>
+                      <strong class="num" id="grad-score-label">231.4 · 大毕业</strong>
+                    </div>
+                    <div class="grad-scale" id="grad-scale">
+                      <div class="grad-tier">起步 &lt;170</div>
+                      <div class="grad-tier">小毕业 190</div>
+                      <div class="grad-tier is-current">大毕业 220+</div>
+                      <div class="grad-tier">极品 245+</div>
+                    </div>
+                  </div>
+                  <div class="hairline-divider" style="margin: 2px 0;"></div>
+                  <div class="metric-label">循环共鸣效率体检</div>
+                  <div id="er-check-list"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 轮切动作明细 (可展开 + 点按进原生乘区 Sheet) -->
+            <div class="card">
+              <details class="rotation-details" id="rotation-details">
+                <summary>
+                  <span>轮切动作伤害明细 (8 步)</span>
+                  <span class="metric-label">点击单步看 6 大乘区 &rsaquo;</span>
+                </summary>
+                <div id="rotation-steps-list"></div>
+              </details>
+            </div>
+          </section>
+        </div>
+
+        <!-- Relay 底部悬浮 Liquid Glass 3-Tab 栏 -->
+        <nav class="bottom-dock" aria-label="Relay 主导航">
+          <button type="button" class="dock-tab" data-dock="agent">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3l2.2 5.3L19.5 10l-5.3 2.2L12 17.5l-2.2-5.3L4.5 10l5.3-1.7z"/>
+            </svg>
+            <span>Agent</span>
+          </button>
+          <button type="button" class="dock-tab" data-dock="tavern">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M5 19V7a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v12"/>
+              <path d="M9 11h6M9 15h4M3 19h18"/>
+            </svg>
+            <span>酒馆</span>
+          </button>
+          <button type="button" class="dock-tab" data-dock="wuwa" aria-current="page">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 13c2.5-6 5.5-6 7.5 0s4.5 6 6.5 0 3-4 4-1"/>
+              <circle cx="12" cy="12" r="9"/>
+            </svg>
+            <span>鸣潮</span>
+          </button>
+        </nav>
+
+        <!-- Dialog 1: 共鸣者详情 Bottom Sheet -->
+        <dialog class="ios-sheet" id="resonator-dialog" closedby="any" aria-labelledby="res-dialog-title">
+          <div class="sheet-inner">
+            <div class="sheet-grabber"></div>
+            <div class="sheet-head">
+              <div style="display: flex; align-items: center; gap: 11px;">
+                <div class="crest" id="res-dialog-crest">爱</div>
+                <div>
+                  <h2 class="sheet-title" id="res-dialog-title">爱弥斯</h2>
+                  <div class="res-sub num" id="res-dialog-sub">热熔 · 迅刀 · Lv.90 · 2链</div>
+                </div>
+              </div>
+              <button type="button" class="close-btn" data-close-dialog="resonator-dialog" aria-label="关闭角色面板">✕</button>
+            </div>
+            <div id="res-dialog-body"></div>
+          </div>
+        </dialog>
+
+        <!-- Dialog 2: 轮切动作乘区详情 Sheet -->
+        <dialog class="ios-sheet" id="step-dialog" closedby="any" aria-labelledby="step-dialog-title">
+          <div class="sheet-inner">
+            <div class="sheet-grabber"></div>
+            <div class="sheet-head">
+              <div>
+                <h2 class="sheet-title" id="step-dialog-title">动作乘区拆解</h2>
+                <div class="res-sub num" id="step-dialog-sub">6 大乘区期望与生效 Buff</div>
+              </div>
+              <button type="button" class="close-btn" data-close-dialog="step-dialog" aria-label="关闭乘区拆解">✕</button>
+            </div>
+            <div id="step-dialog-body"></div>
+          </div>
+        </dialog>
+
+        <!-- Dialog 3: 账号与离线数据 Sheet -->
+        <dialog class="ios-sheet" id="account-dialog" closedby="any" aria-labelledby="account-dialog-title">
+          <div class="sheet-inner">
+            <div class="sheet-grabber"></div>
+            <div class="sheet-head">
+              <div>
+                <h2 class="sheet-title" id="account-dialog-title">账号与数据源</h2>
+                <div class="res-sub num">UID 104829316 · 官服 · 本地缓存 18.4 MB</div>
+              </div>
+              <button type="button" class="close-btn" data-close-dialog="account-dialog" aria-label="关闭账号面板">✕</button>
+            </div>
+            <div class="list-row">
+              <div class="list-row-head">
+                <span>库街区凭证</span>
+                <span class="badge badge-ok">已绑定 (Keychain)</span>
+              </div>
+              <span class="metric-label">仅短信登录瞬间呼出极验验证窗，日常刷新全走原生 URLSession。</span>
+            </div>
+            <div class="list-row">
+              <div class="list-row-head">
+                <span>本地计算引擎</span>
+                <span class="badge badge-neutral">JavaScriptCore 离线</span>
+              </div>
+              <span class="metric-label">完整复用 WaveShelf 伤害/声骸/抽卡 TS 引擎，无网页壳，无网络延迟。</span>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px;">
+              <button type="button" class="chip-btn" style="justify-content: center; padding: 10px;" id="mock-import-token">导入库街区 Token</button>
+              <button type="button" class="chip-btn" style="justify-content: center; padding: 10px;" id="mock-import-gacha">导入唤取备份 JSON</button>
+            </div>
+          </div>
+        </dialog>
+      </div>
+    </div>
+
+    <!-- 桌面宽屏右侧 SwiftUI 原生映射对照面板 -->
+    <aside class="spec-panel" id="spec-panel" aria-label="SwiftUI 原生实现映射">
+      <h2 id="spec-panel-title">总览 · 原生 SwiftUI 映射</h2>
+      <div id="spec-panel-body"></div>
+    </aside>
+  </main>
+
+  <script>
+    (function () {
+      'use strict';
+
+      /* ---------- 1. 数据定义 (假数据) ---------- */
+      var ELEMENTS = {
+        fusion: { label: '热熔', color: '#DC5232', short: '熔' },
+        havoc: { label: '湮灭', color: '#AE3670', short: '湮' },
+        spectro: { label: '衍射', color: '#BE9010', short: '衍' },
+        glacio: { label: '冷凝', color: '#2B93CF', short: '凝' },
+        aero: { label: '气动', color: '#16A077', short: '气' },
+        electro: { label: '导电', color: '#8A50CF', short: '电' }
+      };
+
+      var RESONATORS = [
+        {
+          id: 'aemeath', name: '爱弥斯', element: 'fusion', weaponType: '迅刀', level: 90, chain: 2,
+          weapon: '赫奕流明 · R1', score: 231.4, grade: 'S+', teamId: 'aemeath',
+          stats: { atk: '2,642', cr: '76.8%', cd: '294.2%', er: '128.4%', dmg: '82.0%', hp: '16,940' },
+          trend: [184, 198, 211, 224, 231.4],
+          echoes: [
+            { cost: 4, name: '赫朗格尔 · 4C', main: '暴击伤害 +44%', score: 49.2, subs: [['暴击率 +9.9%', 'core'], ['暴击伤害 +18.6%', 'core'], ['共鸣解放 +10.1%', 'core'], ['攻击力 +8.6%', 'useful'], ['生命 +320', 'dead']] },
+            { cost: 3, name: '熔山棱镜 · 3C', main: '热熔伤害 +30%', score: 47.6, subs: [['暴击率 +9.3%', 'core'], ['暴击伤害 +17.4%', 'core'], ['攻击力 +9.4%', 'useful'], ['共鸣效率 +10.8%', 'useful'], ['防御 +40', 'dead']] },
+            { cost: 3, name: '绿熔蜥 · 3C', main: '热熔伤害 +30%', score: 44.8, subs: [['暴击率 +8.7%', 'core'], ['暴击伤害 +16.2%', 'core'], ['共鸣解放 +8.6%', 'core'], ['小攻击 +40', 'useful'], ['重击 +7.1%', 'dead']] },
+            { cost: 1, name: '火鬃狼 · 1C', main: '攻击力 +18%', score: 45.4, subs: [['暴击率 +9.3%', 'core'], ['暴击伤害 +16.8%', 'core'], ['攻击力 +7.9%', 'useful'], ['共鸣效率 +9.2%', 'useful'], ['治疗加成 +4.2%', 'dead']] },
+            { cost: 1, name: '鸣钟龟仔 · 1C', main: '攻击力 +18%', score: 44.4, subs: [['暴击率 +8.1%', 'core'], ['暴击伤害 +17.4%', 'core'], ['攻击力 +8.6%', 'useful'], ['小攻击 +30', 'useful'], ['生命 +4.9%', 'dead']] }
+          ]
+        },
+        {
+          id: 'camellya', name: '椿', element: 'havoc', weaponType: '迅刀', level: 90, chain: 2,
+          weapon: '裁春 · R1', score: 228.6, grade: 'S+', teamId: 'camellya',
+          stats: { atk: '2,495', cr: '73.5%', cd: '288.0%', er: '118.2%', dmg: '86.0%', hp: '16,220' },
+          trend: [179, 194, 208, 219, 228.6],
+          echoes: [
+            { cost: 4, name: '无妄者 · 4C', main: '暴击率 +22%', score: 48.1, subs: [['暴击伤害 +19.8%', 'core'], ['暴击率 +8.7%', 'core'], ['普攻伤害 +10.9%', 'core'], ['攻击力 +8.6%', 'useful'], ['防御 +50', 'dead']] },
+            { cost: 3, name: '暗鬃狼 · 3C', main: '湮灭伤害 +30%', score: 46.5, subs: [['暴击率 +9.3%', 'core'], ['暴击伤害 +16.8%', 'core'], ['普攻伤害 +9.4%', 'core'], ['攻击力 +7.9%', 'useful'], ['共鸣技能 +7.1%', 'dead']] },
+            { cost: 3, name: '戏猿 · 3C', main: '湮灭伤害 +30%', score: 44.9, subs: [['暴击率 +8.1%', 'core'], ['暴击伤害 +17.4%', 'core'], ['攻击力 +9.4%', 'useful'], ['共鸣效率 +9.2%', 'useful'], ['生命 +430', 'dead']] },
+            { cost: 1, name: '振铎乐师 · 1C', main: '攻击力 +18%', score: 45.2, subs: [['暴击率 +9.3%', 'core'], ['暴击伤害 +15.6%', 'core'], ['普攻伤害 +8.6%', 'core'], ['攻击力 +7.1%', 'useful'], ['防御 +6.4%', 'dead']] },
+            { cost: 1, name: '巡哨机傀 · 1C', main: '攻击力 +18%', score: 43.9, subs: [['暴击率 +7.5%', 'core'], ['暴击伤害 +17.4%', 'core'], ['普攻伤害 +9.4%', 'core'], ['小攻击 +40', 'useful'], ['生命 +5.3%', 'dead']] }
+          ]
+        },
+        {
+          id: 'jinhsi', name: '今汐', element: 'spectro', weaponType: '长刃', level: 90, chain: 1,
+          weapon: '时和岁稔 · R1', score: 219.5, grade: 'S', teamId: 'jinhsi',
+          stats: { atk: '2,580', cr: '78.2%', cd: '276.4%', er: '122.0%', dmg: '78.0%', hp: '17,120' },
+          trend: [172, 189, 203, 212, 219.5],
+          echoes: [
+            { cost: 4, name: '角 · 4C', main: '暴击伤害 +44%', score: 47.0, subs: [['暴击率 +9.9%', 'core'], ['暴击伤害 +16.8%', 'core'], ['共鸣技能 +10.1%', 'core'], ['攻击力 +7.9%', 'useful'], ['防御 +40', 'dead']] },
+            { cost: 3, name: '磐石守卫 · 3C', main: '衍射伤害 +30%', score: 44.2, subs: [['暴击率 +8.7%', 'core'], ['暴击伤害 +15.6%', 'core'], ['共鸣技能 +9.4%', 'core'], ['小攻击 +30', 'useful'], ['普攻 +6.4%', 'dead']] },
+            { cost: 3, name: '光踏兽 · 3C', main: '攻击力 +30%', score: 43.1, subs: [['暴击率 +8.1%', 'core'], ['暴击伤害 +16.2%', 'core'], ['共鸣效率 +10.0%', 'useful'], ['攻击力 +7.1%', 'useful'], ['生命 +390', 'dead']] },
+            { cost: 1, name: '游鳞机枢 · 1C', main: '攻击力 +18%', score: 43.4, subs: [['暴击率 +8.1%', 'core'], ['暴击伤害 +16.8%', 'core'], ['共鸣技能 +8.6%', 'core'], ['攻击力 +6.4%', 'useful'], ['防御 +5.8%', 'dead']] },
+            { cost: 1, name: '阿嗞嗞 · 1C', main: '攻击力 +18%', score: 41.8, subs: [['暴击率 +7.5%', 'core'], ['暴击伤害 +15.0%', 'core'], ['共鸣技能 +9.4%', 'core'], ['小攻击 +40', 'useful'], ['重击 +7.1%', 'dead']] }
+          ]
+        },
+        {
+          id: 'daniya', name: '达妮娅', element: 'fusion', weaponType: '音感仪', level: 90, chain: 0,
+          weapon: '掣傀之手 · R1', score: 214.2, grade: 'S', teamId: 'aemeath',
+          stats: { atk: '2,280', cr: '71.4%', cd: '264.6%', er: '138.6%', dmg: '72.0%', hp: '16,540' },
+          trend: [168, 181, 196, 206, 214.2],
+          echoes: [
+            { cost: 4, name: '燎照之骑 · 4C', main: '暴击率 +22%', score: 44.6, subs: [['暴击伤害 +18.0%', 'core'], ['暴击率 +8.1%', 'core'], ['共鸣效率 +10.8%', 'useful'], ['攻击力 +7.9%', 'useful'], ['生命 +380', 'dead']] },
+            { cost: 3, name: '刺玫菇 · 3C', main: '热熔伤害 +30%', score: 42.9, subs: [['暴击率 +8.1%', 'core'], ['暴击伤害 +15.0%', 'core'], ['共鸣技能 +8.6%', 'core'], ['共鸣效率 +9.2%', 'useful'], ['防御 +40', 'dead']] },
+            { cost: 3, name: '绿熔蜥 · 3C', main: '热熔伤害 +30%', score: 41.7, subs: [['暴击率 +7.5%', 'core'], ['暴击伤害 +15.6%', 'core'], ['攻击力 +8.6%', 'useful'], ['小攻击 +30', 'useful'], ['重击 +6.4%', 'dead']] },
+            { cost: 1, name: '暗鬃狼 · 1C', main: '攻击力 +18%', score: 43.2, subs: [['暴击率 +8.7%', 'core'], ['暴击伤害 +15.6%', 'core'], ['攻击力 +7.9%', 'useful'], ['共鸣效率 +9.2%', 'useful'], ['防御 +4.9%', 'dead']] },
+            { cost: 1, name: '鸣钟龟仔 · 1C', main: '攻击力 +18%', score: 41.8, subs: [['暴击率 +7.5%', 'core'], ['暴击伤害 +15.0%', 'core'], ['共鸣技能 +7.9%', 'core'], ['小攻击 +40', 'useful'], ['生命 +5.3%', 'dead']] }
+          ]
+        },
+        {
+          id: 'shorekeeper', name: '守岸人', element: 'spectro', weaponType: '音感仪', level: 90, chain: 0,
+          weapon: '星序协响 · R1', score: 204.8, grade: 'S', teamId: 'camellya',
+          stats: { atk: '1,420', cr: '18.5%', cd: '224.0%', er: '252.4%', dmg: '24.0%', hp: '36,480' },
+          trend: [165, 178, 190, 199, 204.8],
+          echoes: [
+            { cost: 4, name: '无归的谬误 · 4C', main: '治疗效果 +26%', score: 42.8, subs: [['共鸣效率 +12.4%', 'core'], ['生命 +9.4%', 'core'], ['暴击伤害 +16.2%', 'useful'], ['共鸣解放 +7.9%', 'useful'], ['防御 +40', 'dead']] },
+            { cost: 3, name: '磐石守卫 · 3C', main: '共鸣效率 +32%', score: 41.5, subs: [['共鸣效率 +10.8%', 'core'], ['生命 +8.6%', 'core'], ['暴击伤害 +15.0%', 'useful'], ['小生命 +490', 'useful'], ['攻击 +6.4%', 'dead']] },
+            { cost: 3, name: '阿嗞嗞 · 3C', main: '共鸣效率 +32%', score: 40.9, subs: [['共鸣效率 +10.0%', 'core'], ['生命 +9.4%', 'core'], ['暴击伤害 +14.4%', 'useful'], ['小生命 +430', 'useful'], ['防御 +50', 'dead']] },
+            { cost: 1, name: '晶螯蝎 · 1C', main: '生命 +22.8%', score: 40.2, subs: [['共鸣效率 +10.8%', 'core'], ['暴击伤害 +15.6%', 'useful'], ['生命 +7.9%', 'core'], ['小生命 +410', 'useful'], ['普攻 +6.4%', 'dead']] },
+            { cost: 1, name: '叮咚咚 · 1C', main: '生命 +22.8%', score: 39.4, subs: [['共鸣效率 +9.2%', 'core'], ['暴击伤害 +15.0%', 'useful'], ['生命 +7.1%', 'core'], ['防御 +6.4%', 'dead'], ['重击 +7.1%', 'dead']] }
+          ]
+        },
+        {
+          id: 'zhezhi', name: '折枝', element: 'glacio', weaponType: '音感仪', level: 90, chain: 0,
+          weapon: '琼枝冰绡 · R1', score: 201.3, grade: 'S', teamId: 'jinhsi',
+          stats: { atk: '2,210', cr: '70.2%', cd: '258.4%', er: '132.5%', dmg: '70.0%', hp: '15,880' },
+          trend: [158, 174, 188, 195, 201.3],
+          echoes: [
+            { cost: 4, name: '辉萤军势 · 4C', main: '暴击率 +22%', score: 42.1, subs: [['暴击伤害 +17.4%', 'core'], ['暴击率 +7.5%', 'core'], ['共鸣效率 +10.0%', 'useful'], ['攻击力 +7.9%', 'useful'], ['生命 +320', 'dead']] },
+            { cost: 3, name: '振铎乐师 · 3C', main: '冷凝伤害 +30%', score: 40.6, subs: [['暴击率 +7.5%', 'core'], ['暴击伤害 +15.0%', 'core'], ['普攻伤害 +9.4%', 'core'], ['共鸣效率 +9.2%', 'useful'], ['防御 +50', 'dead']] },
+            { cost: 3, name: '寒霜陆龟 · 3C', main: '冷凝伤害 +30%', score: 39.8, subs: [['暴击率 +7.5%', 'core'], ['暴击伤害 +14.4%', 'core'], ['攻击力 +8.6%', 'useful'], ['共鸣效率 +8.4%', 'useful'], ['重击 +6.4%', 'dead']] },
+            { cost: 1, name: '巡哨机傀 · 1C', main: '攻击力 +18%', score: 39.6, subs: [['暴击率 +8.1%', 'core'], ['暴击伤害 +14.4%', 'core'], ['攻击力 +7.1%', 'useful'], ['小攻击 +30', 'useful'], ['生命 +4.9%', 'dead']] },
+            { cost: 1, name: '戏猿 · 1C', main: '攻击力 +18%', score: 39.2, subs: [['暴击率 +6.9%', 'core'], ['暴击伤害 +15.0%', 'core'], ['普攻伤害 +8.6%', 'core'], ['共鸣效率 +8.4%', 'useful'], ['防御 +6.4%', 'dead']] }
+          ]
+        },
+        {
+          id: 'mornye', name: '莫宁', element: 'fusion', weaponType: '佩枪', level: 90, chain: 1,
+          weapon: '停驻之烟 · R1', score: 198.6, grade: 'A+', teamId: 'aemeath',
+          stats: { atk: '2,120', cr: '64.5%', cd: '238.0%', er: '146.2%', dmg: '60.0%', hp: '16,710' },
+          trend: [152, 169, 181, 192, 198.6],
+          echoes: [
+            { cost: 4, name: '无归的谬误 · 4C', main: '暴击率 +22%', score: 41.2, subs: [['暴击伤害 +15.6%', 'core'], ['共鸣效率 +11.6%', 'core'], ['暴击率 +7.5%', 'core'], ['攻击力 +7.1%', 'useful'], ['防御 +40', 'dead']] },
+            { cost: 3, name: '巡哨机傀 · 3C', main: '共鸣效率 +32%', score: 40.1, subs: [['暴击率 +7.5%', 'core'], ['暴击伤害 +14.4%', 'core'], ['共鸣效率 +10.0%', 'core'], ['攻击力 +7.9%', 'useful'], ['生命 +390', 'dead']] },
+            { cost: 3, name: '绿熔蜥 · 3C', main: '热熔伤害 +30%', score: 39.4, subs: [['暴击率 +6.9%', 'core'], ['暴击伤害 +15.0%', 'core'], ['攻击力 +7.9%', 'useful'], ['共鸣效率 +9.2%', 'useful'], ['重击 +6.4%', 'dead']] },
+            { cost: 1, name: '暗鬃狼 · 1C', main: '攻击力 +18%', score: 39.0, subs: [['暴击率 +7.5%', 'core'], ['暴击伤害 +14.4%', 'core'], ['共鸣效率 +8.4%', 'core'], ['小攻击 +30', 'useful'], ['防御 +5.8%', 'dead']] },
+            { cost: 1, name: '鸣钟龟仔 · 1C', main: '攻击力 +18%', score: 38.9, subs: [['暴击率 +6.9%', 'core'], ['暴击伤害 +13.8%', 'core'], ['攻击力 +8.6%', 'useful'], ['共鸣效率 +9.2%', 'core'], ['生命 +4.9%', 'dead']] }
+          ]
+        },
+        {
+          id: 'jiyan', name: '忌炎', element: 'aero', weaponType: '长刃', level: 80, chain: 0,
+          weapon: '苍鳞千嶂 · R1', score: 196.4, grade: 'A+', teamId: 'aemeath',
+          stats: { atk: '2,265', cr: '68.4%', cd: '252.0%', er: '129.0%', dmg: '68.0%', hp: '15,490' },
+          trend: [148, 165, 179, 189, 196.4],
+          echoes: [
+            { cost: 4, name: '飞廉之猩 · 4C', main: '暴击率 +22%', score: 41.0, subs: [['暴击伤害 +16.2%', 'core'], ['暴击率 +7.5%', 'core'], ['重击伤害 +9.4%', 'core'], ['共鸣效率 +9.2%', 'useful'], ['生命 +350', 'dead']] },
+            { cost: 3, name: '青羽鹭 · 3C', main: '气动伤害 +30%', score: 39.5, subs: [['暴击率 +7.5%', 'core'], ['暴击伤害 +14.4%', 'core'], ['重击伤害 +8.6%', 'core'], ['攻击力 +7.1%', 'useful'], ['防御 +40', 'dead']] },
+            { cost: 3, name: '呼咻咻 · 3C', main: '气动伤害 +30%', score: 38.8, subs: [['暴击率 +6.9%', 'core'], ['暴击伤害 +15.0%', 'core'], ['共鸣效率 +10.0%', 'useful'], ['小攻击 +30', 'useful'], ['生命 +410', 'dead']] },
+            { cost: 1, name: '游鳞机枢 · 1C', main: '攻击力 +18%', score: 38.7, subs: [['暴击率 +7.5%', 'core'], ['暴击伤害 +13.8%', 'core'], ['重击伤害 +8.6%', 'core'], ['攻击力 +6.4%', 'useful'], ['防御 +6.4%', 'dead']] },
+            { cost: 1, name: '叮咚咚 · 1C', main: '攻击力 +18%', score: 38.4, subs: [['暴击率 +6.9%', 'core'], ['暴击伤害 +14.4%', 'core'], ['攻击力 +7.9%', 'useful'], ['共鸣效率 +8.4%', 'useful'], ['生命 +5.3%', 'dead']] }
+          ]
+        }
+      ];
+
+      var GACHA_POOLS = {
+        charEvent: {
+          pity: 54, max: 80, total: 468, avg: '52.0', winRate: '66.7%', guarantee: true, guaranteeLabel: '大保底',
+          items: [
+            { name: '维里奈', pulls: 69, tag: '歪', tagType: 'danger', date: '11-18' },
+            { name: '爱弥斯', pulls: 24, tag: '不歪', tagType: 'ok', date: '11-09' },
+            { name: '爱弥斯', pulls: 74, tag: '大保底', tagType: 'warn', date: '11-08' },
+            { name: '凌阳', pulls: 61, tag: '歪', tagType: 'danger', date: '10-21' },
+            { name: '椿', pulls: 31, tag: '不歪', tagType: 'ok', date: '10-03' }
+          ]
+        },
+        weapEvent: {
+          pity: 22, max: 80, total: 174, avg: '58.0', winRate: '100%', guarantee: false, guaranteeLabel: '必中 UP',
+          items: [
+            { name: '赫奕流明', pulls: 64, tag: '必中', tagType: 'ok', date: '11-09' },
+            { name: '裁春', pulls: 42, tag: '必中', tagType: 'ok', date: '10-04' },
+            { name: '时和岁稔', pulls: 68, tag: '必中', tagType: 'ok', date: '08-19' }
+          ]
+        },
+        charStd: {
+          pity: 38, max: 80, total: 162, avg: '54.0', winRate: '不适用', guarantee: false, guaranteeLabel: '常规池',
+          items: [
+            { name: '安可', pulls: 59, tag: '常驻', tagType: 'neutral', date: '09-14' },
+            { name: '卡卡罗', pulls: 71, tag: '常驻', tagType: 'neutral', date: '06-22' },
+            { name: '维里奈', pulls: 32, tag: '常驻', tagType: 'neutral', date: '04-08' }
+          ]
+        },
+        weapStd: {
+          pity: 15, max: 80, total: 82, avg: '41.0', winRate: '不适用', guarantee: false, guaranteeLabel: '定向中',
+          items: [
+            { name: '千古洑流', pulls: 48, tag: '定向', tagType: 'ok', date: '09-29' },
+            { name: '停驻之烟', pulls: 34, tag: '定向', tagType: 'ok', date: '05-11' }
+          ]
+        }
+      };
+
+      var TEAM_DATA = {
+        aemeath: {
+          title: '爱弥斯 · 达妮娅 · 莫宁',
+          durLoop: 24.0,
+          durBurst: 11.5,
+          burstFactor: 0.72,
+          baselineDpr: 2486420,
+          history: [1920000, 2140000, 2295000, 2410000, 2486420],
+          members: [
+            { name: '爱弥斯', role: '主C', element: 'fusion', baseShare: 0.764, baseChain: 2, baseWeapon: 'sig', baseRefine: 1, baseEcho: '43311_ele', erActual: 128.4, erNeed: 122.0 },
+            { name: '达妮娅', role: '副C', element: 'fusion', baseShare: 0.168, baseChain: 0, baseWeapon: 'sig', baseRefine: 1, baseEcho: '43311_ele', erActual: 138.6, erNeed: 135.0 },
+            { name: '莫宁', role: '辅助', element: 'fusion', baseShare: 0.068, baseChain: 1, baseWeapon: 'std', baseRefine: 1, baseEcho: '43311_atk', erActual: 146.2, erNeed: 150.0 }
+          ],
+          goldPlans: {
+            1: {
+              trap: null,
+              champion: { title: '爱弥斯 2链 → 3链', gain: '+12.8%', perGold: '+12.8% / 金', apply: [{ slot: 0, chain: 3 }] },
+              alts: [
+                { title: '达妮娅 0链 → 1链', gain: '+6.4%' },
+                { title: '爱弥斯 专武 R1 → R2', gain: '+4.9%' }
+              ]
+            },
+            2: {
+              trap: '防贪心提示：+1 金贪心先补达妮娅 1 链再补专武仅 +11.9%；而直接规划 +2 金冲刺爱弥斯 3 链 + 专武 R2 或莫宁 2 链可达 +21.4%。',
+              champion: { title: '爱弥斯 3链 + 专武 R2', gain: '+21.4%', perGold: '+10.7% / 金', apply: [{ slot: 0, chain: 3, refine: 2 }] },
+              alts: [
+                { title: '爱弥斯 3链 + 达妮娅 1链', gain: '+19.8%' },
+                { title: '爱弥斯 2链 + 莫宁 2链(2金跨档)', gain: '+14.2%' }
+              ]
+            },
+            3: {
+              trap: '防贪心提示：跳过中间平缓的 4 链停顿，直接以爱弥斯 4 链 + 达妮娅 1 链为 3 金落点收益更高。',
+              champion: { title: '爱弥斯 4链 + 达妮娅 1链', gain: '+31.6%', perGold: '+10.5% / 金', apply: [{ slot: 0, chain: 4 }, { slot: 1, chain: 1 }] },
+              alts: [
+                { title: '爱弥斯 3链 + 专武 R3', gain: '+25.8%' },
+                { title: '爱弥斯 4链 + 莫宁 2链', gain: '+28.9%' }
+              ]
+            },
+            4: {
+              trap: '直接冲刺主 C 质变 6 链：跳过所有过渡小提升，+4 金直达完全体爆发轴。',
+              champion: { title: '爱弥斯 2链 → 6链', gain: '+54.2%', perGold: '+13.6% / 金', apply: [{ slot: 0, chain: 6 }] },
+              alts: [
+                { title: '爱弥斯 4链 + 达妮娅 2链', gain: '+38.4%' },
+                { title: '爱弥斯 5链 + 专武 R2', gain: '+41.1%' }
+              ]
+            }
+          },
+          substats: [
+            { label: '暴击率 +3.0%', gain: 2.9 },
+            { label: '暴击伤害 +6.0%', gain: 2.7 },
+            { label: '共鸣解放 +8.6%', gain: 2.1 },
+            { label: '大攻击 +8.6%', gain: 1.8 },
+            { label: '小攻击 +40', gain: 0.9 }
+          ],
+          weakEcho: {
+            slot: '1C · 鸣钟龟仔',
+            score: 44.4,
+            valid: 4,
+            gainIfMax: '+2.3%',
+            note: '仅双暴偏低，尾条生命%无效，重刷至 48.5 分可为整队贡献约 +57,100 DPR。'
+          },
+          gradScore: 231.4,
+          gradLabel: '大毕业',
+          steps: [
+            { actor: '莫宁', skill: '延奏 · 炽燃协奏场', pct: 0.036, mult: '412%', atk: '2,120', dmg: '+86%', deepen: '1.00×', crit: '2.18×', res: '0.453×', buffs: ['莫宁 1链易伤 +15%', '轻云出月 22.5% 攻击'] },
+            { actor: '达妮娅', skill: '共鸣技能 · 绯焰织网', pct: 0.072, mult: '785%', atk: '2,280', dmg: '+102%', deepen: '1.15×', crit: '2.31×', res: '0.453×', buffs: ['轻云延奏攻击 +22.5%', '自身热熔增伤 +30%'] },
+            { actor: '达妮娅', skill: '共鸣解放 · 炽羽落幕', pct: 0.096, mult: '1,120%', atk: '2,280', dmg: '+118%', deepen: '1.15×', crit: '2.31×', res: '0.453×', buffs: ['掣傀之手后台增益', '延奏热熔加深 +20%'] },
+            { actor: '爱弥斯', skill: '变奏入场 · 焰痕启刃', pct: 0.088, mult: '640%', atk: '2,642', dmg: '+138%', deepen: '1.38×', crit: '2.56×', res: '0.453×', buffs: ['达妮娅延奏热熔加深 20%', '解放伤害加深 25%'] },
+            { actor: '爱弥斯', skill: '强化共鸣技能 · 星弧斩', pct: 0.146, mult: '980%', atk: '2,642', dmg: '+144%', deepen: '1.38×', crit: '2.56×', res: '0.453×', buffs: ['爱弥斯 2链倍率强化', '专武赫奕流明 3 层'] },
+            { actor: '爱弥斯', skill: '共鸣回路 · 炽核终曲', pct: 0.214, mult: '1,420%', atk: '2,642', dmg: '+156%', deepen: '1.38×', crit: '2.56×', res: '0.453×', buffs: ['热熔双核共振', '莫宁领域全伤害加深 15%'] },
+            { actor: '爱弥斯', skill: '共鸣解放 · 终焉炽华', pct: 0.284, mult: '1,960%', atk: '2,642', dmg: '+168%', deepen: '1.48×', crit: '2.56×', res: '0.453×', buffs: ['解放伤害专属加成', '2链减防无视 18%'] },
+            { actor: '爱弥斯', skill: '4C 声骸 · 赫朗格尔补伤', pct: 0.064, mult: '495%', atk: '2,642', dmg: '+122%', deepen: '1.20×', crit: '2.56×', res: '0.453×', buffs: ['声骸套装四件套增益'] }
+          ]
+        },
+        camellya: {
+          title: '椿 · 散华 · 守岸人',
+          durLoop: 25.0,
+          durBurst: 12.2,
+          burstFactor: 0.70,
+          baselineDpr: 2218900,
+          history: [1760000, 1915000, 2060000, 2145000, 2218900],
+          members: [
+            { name: '椿', role: '主C', element: 'havoc', baseShare: 0.802, baseChain: 2, baseWeapon: 'sig', baseRefine: 1, baseEcho: '43311_ele', erActual: 118.2, erNeed: 115.0 },
+            { name: '散华', role: '副C', element: 'glacio', baseShare: 0.141, baseChain: 6, baseWeapon: 'std', baseRefine: 1, baseEcho: '43311_atk', erActual: 136.0, erNeed: 130.0 },
+            { name: '守岸人', role: '辅助', element: 'spectro', baseShare: 0.057, baseChain: 0, baseWeapon: 'sig', baseRefine: 1, baseEcho: '43311_atk', erActual: 252.4, erNeed: 250.0 }
+          ],
+          goldPlans: {
+            1: {
+              trap: null,
+              champion: { title: '守岸人 0链 → 1链(手感扩展)', gain: '+7.5%', perGold: '+7.5% / 金', apply: [{ slot: 2, chain: 1 }] },
+              alts: [
+                { title: '椿 2链 → 3链', gain: '+11.2%' },
+                { title: '椿 专武 R1 → R2', gain: '+5.4%' }
+              ]
+            },
+            2: {
+              trap: '防贪心提示：守岸人 2 链(全队 +40% 攻击)在多波次轴中表现优异，与椿 3 链收益接近。',
+              champion: { title: '守岸人 0链 → 2链', gain: '+17.8%', perGold: '+8.9% / 金', apply: [{ slot: 2, chain: 2 }] },
+              alts: [
+                { title: '椿 2链 → 3链 + 专武 R2', gain: '+16.9%' },
+                { title: '守岸人 1链 + 椿 3链', gain: '+18.4%' }
+              ]
+            },
+            3: {
+              trap: null,
+              champion: { title: '守岸人 2链 + 椿 3链', gain: '+28.6%', perGold: '+9.5% / 金', apply: [{ slot: 0, chain: 3 }, { slot: 2, chain: 2 }] },
+              alts: [
+                { title: '椿 2链 → 5链', gain: '+26.2%' },
+                { title: '椿 3链 + 专武 R3', gain: '+22.4%' }
+              ]
+            },
+            4: {
+              trap: '4 金直接跨过中间节点冲刺椿 6 链，一日花多段收割翻倍。',
+              champion: { title: '椿 2链 → 6链', gain: '+51.8%', perGold: '+13.0% / 金', apply: [{ slot: 0, chain: 6 }] },
+              alts: [
+                { title: '守岸人 2链 + 椿 4链', gain: '+36.5%' },
+                { title: '守岸人 2链 + 椿 3链 + R2', gain: '+33.8%' }
+              ]
+            }
+          },
+          substats: [
+            { label: '暴击率 +3.0%', gain: 3.1 },
+            { label: '暴击伤害 +6.0%', gain: 2.6 },
+            { label: '普攻伤害 +8.6%', gain: 2.3 },
+            { label: '大攻击 +8.6%', gain: 1.7 },
+            { label: '小攻击 +40', gain: 0.8 }
+          ],
+          weakEcho: {
+            slot: '1C · 巡哨机傀',
+            score: 43.9,
+            valid: 4,
+            gainIfMax: '+2.1%',
+            note: '暴击率仅 7.5%，替换至 9.3%+ 双暴胚可稳定让满领域暴击率接近 98%。'
+          },
+          gradScore: 228.6,
+          gradLabel: '大毕业',
+          steps: [
+            { actor: '守岸人', skill: '共鸣解放 · 终末回环', pct: 0.032, mult: '340%', atk: '1,420', dmg: '+45%', deepen: '1.15×', crit: '2.02×', res: '0.453×', buffs: ['星序协响 +14% 攻击', '金星领域 +12.5% 暴击 / +25% 暴伤'] },
+            { actor: '散华', skill: '重击爆裂 + 共鸣解放', pct: 0.141, mult: '1,180%', atk: '2,040', dmg: '+96%', deepen: '1.15×', crit: '2.24×', res: '0.453×', buffs: ['极速协奏延奏', '轻云 22.5% 攻击'] },
+            { actor: '椿', skill: '变奏入场 · 蔓生缠绕', pct: 0.095, mult: '680%', atk: '2,495', dmg: '+148%', deepen: '1.53×', crit: '2.78×', res: '0.453×', buffs: ['散华延奏普攻加深 38%', '守岸人全加深 15%'] },
+            { actor: '椿', skill: '含苞状态 · 一日花爆发', pct: 0.312, mult: '1,820%', atk: '2,495', dmg: '+174%', deepen: '1.53×', crit: '2.78×', res: '0.453×', buffs: ['椿 2链一日花倍率 +120%', '裁春专武叠满层'] },
+            { actor: '椿', skill: '盛放红椿 · 持续旋斩', pct: 0.244, mult: '1,640%', atk: '2,495', dmg: '+162%', deepen: '1.53×', crit: '2.78×', res: '0.453×', buffs: ['守岸人金星满暴加成', '暗套普攻增伤'] },
+            { actor: '椿', skill: '共鸣解放 · 芳华绽灭', pct: 0.118, mult: '910%', atk: '2,495', dmg: '+126%', deepen: '1.15×', crit: '2.78×', res: '0.453×', buffs: ['守岸人领域全加深 15%'] },
+            { actor: '椿', skill: '4C 声骸 · 无妄者', pct: 0.038, mult: '420%', atk: '2,495', dmg: '+118%', deepen: '1.15×', crit: '2.78×', res: '0.453×', buffs: ['声骸固定加成'] },
+            { actor: '守岸人', skill: '洞悉变奏 · 必暴重击', pct: 0.020, mult: '295%', atk: '1,420', dmg: '+64%', deepen: '1.15×', crit: '2.24×', res: '0.453×', buffs: ['生命倍率 100% 必暴'] }
+          ]
+        },
+        jinhsi: {
+          title: '今汐 · 折枝 · 维里奈',
+          durLoop: 24.5,
+          durBurst: 10.8,
+          burstFactor: 0.74,
+          baselineDpr: 2145600,
+          history: [1690000, 1840000, 1985000, 2075000, 2145600],
+          members: [
+            { name: '今汐', role: '主C', element: 'spectro', baseShare: 0.795, baseChain: 1, baseWeapon: 'sig', baseRefine: 1, baseEcho: '43311_atk', erActual: 122.0, erNeed: 120.0 },
+            { name: '折枝', role: '副C', element: 'glacio', baseShare: 0.168, baseChain: 0, baseWeapon: 'sig', baseRefine: 1, baseEcho: '43311_ele', erActual: 132.5, erNeed: 130.0 },
+            { name: '维里奈', role: '辅助', element: 'spectro', baseShare: 0.037, baseChain: 2, baseWeapon: '4star', baseRefine: 5, baseEcho: '43311_atk', erActual: 218.0, erNeed: 195.0 }
+          ],
+          goldPlans: {
+            1: {
+              trap: null,
+              champion: { title: '今汐 1链 → 2链(深塔首轮起手满韶光)', gain: '+14.5%', perGold: '+14.5% / 金', apply: [{ slot: 0, chain: 2 }] },
+              alts: [
+                { title: '折枝 0链 → 1链', gain: '+6.1%' },
+                { title: '今汐 专武 R1 → R2', gain: '+4.8%' }
+              ]
+            },
+            2: {
+              trap: '今汐 2 链首轮直接多打一次满层大喷，再配合 3 链攻叠收益显著高于补辅助专武。',
+              champion: { title: '今汐 1链 → 3链', gain: '+24.8%', perGold: '+12.4% / 金', apply: [{ slot: 0, chain: 3 }] },
+              alts: [
+                { title: '今汐 2链 + 专武 R2', gain: '+19.6%' },
+                { title: '今汐 2链 + 折枝 1链', gain: '+20.9%' }
+              ]
+            },
+            3: {
+              trap: null,
+              champion: { title: '今汐 1链 → 4链', gain: '+34.2%', perGold: '+11.4% / 金', apply: [{ slot: 0, chain: 4 }] },
+              alts: [
+                { title: '今汐 3链 + 专武 R2', gain: '+30.1%' },
+                { title: '今汐 3链 + 折枝 2链', gain: '+31.8%' }
+              ]
+            },
+            4: {
+              trap: null,
+              champion: { title: '今汐 4链 + 折枝 1链', gain: '+41.0%', perGold: '+10.2% / 金', apply: [{ slot: 0, chain: 4 }, { slot: 1, chain: 1 }] },
+              alts: [
+                { title: '今汐 1链 → 5链', gain: '+43.6%' },
+                { title: '今汐 3链 + 专武 R3', gain: '+35.4%' }
+              ]
+            }
+          },
+          substats: [
+            { label: '暴击率 +3.0%', gain: 3.3 },
+            { label: '暴击伤害 +6.0%', gain: 2.7 },
+            { label: '共鸣技能 +8.6%', gain: 2.5 },
+            { label: '大攻击 +8.6%', gain: 1.9 },
+            { label: '小攻击 +40', gain: 0.9 }
+          ],
+          weakEcho: {
+            slot: '1C · 阿嗞嗞',
+            score: 41.8,
+            valid: 4,
+            gainIfMax: '+2.6%',
+            note: '双暴数值偏中游，大喷期望暴击率非常吃 1C 暴击词条，建议优先重刷。'
+          },
+          gradScore: 219.5,
+          gradLabel: '接近大毕业',
+          steps: [
+            { actor: '维里奈', skill: '延奏 + 隐世回光攻击加成', pct: 0.037, mult: '280%', atk: '1,860', dmg: '+42%', deepen: '1.15×', crit: '1.85×', res: '0.453×', buffs: ['隐世回光 +15% 攻击', '全队伤害加深 +15%'] },
+            { actor: '折枝', skill: '鹤影 · 后台协同叠韶光', pct: 0.168, mult: '1,340%', atk: '2,210', dmg: '+104%', deepen: '1.15×', crit: '2.28×', res: '0.453×', buffs: ['轻云出月 +22.5% 攻击', '延奏共鸣技能加深 +25%'] },
+            { actor: '今汐', skill: '变奏入场 · 天光聚拢', pct: 0.084, mult: '590%', atk: '2,580', dmg: '+148%', deepen: '1.60×', crit: '2.48×', res: '0.453×', buffs: ['折枝延奏技能加深 25%', '维里奈加深 15%'] },
+            { actor: '今汐', skill: '凌霄状态 · 普通攻击四段', pct: 0.112, mult: '780%', atk: '2,580', dmg: '+152%', deepen: '1.60×', crit: '2.48×', res: '0.453×', buffs: ['时和岁稔共鸣技能增益'] },
+            { actor: '今汐', skill: '惊龙破空 · 50 层满韶光龙喷', pct: 0.398, mult: '2,340%', atk: '2,580', dmg: '+176%', deepen: '1.60×', crit: '2.48×', res: '0.453×', buffs: ['1链 4 层技能+80%', '折枝双加深乘法放大'] },
+            { actor: '今汐', skill: '共鸣解放 · 移岁诛邪', pct: 0.146, mult: '1,060%', atk: '2,580', dmg: '+138%', deepen: '1.15×', crit: '2.48×', res: '0.453×', buffs: ['浮星祛暗衍射 40%'] },
+            { actor: '今汐', skill: '4C 声骸 · 角协同吐息', pct: 0.055, mult: '460%', atk: '2,580', dmg: '+124%', deepen: '1.15×', crit: '2.48×', res: '0.453×', buffs: ['角技能增伤 +16%'] }
+          ]
+        }
+      };
+
+      var SWIFTUI_SPECS = {
+        home: [
+          ['Liquid Glass 与内容分层', '顶栏头像按钮与底部 3-Tab 栏使用 .glassEffect(.regular.interactive())；中部波片卡、签到条与水位卡保持非玻璃纯色卡片 + hairline 细边，避免大面积玻璃糊成一片。'],
+          ['结晶波片实时倒计时', '使用 SwiftUI TimelineView(.periodic(from: .now, by: 60)) 本地推进恢复数值与满额时间，不依赖后台高频联网。'],
+          ['本地通知提醒开关', '绑定 UNUserNotificationCenter，在预计达到设定阈值(如 200)时下发本地推送。']
+        ],
+        roles: [
+          ['2 列自适应网格', 'LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())]) 展示，属性色仅作顶缘极微弱渐变光晕，确保字体对比度。'],
+          ['原生 Sheet 与 Swift Charts', '点击卡片通过 .sheet(item:) 弹出原生半高/全高面板，内部声骸成长曲线使用原生 Swift Charts LineMark + AreaMark 渲染。'],
+          ['零网页直通实验室', '面板底部快捷按钮直接设置 CalcLabViewModel.selectedTeam 并切换分段，无需二次选队。']
+        ],
+        gacha: [
+          ['分段与环形水位计', 'Picker(.segmented) 或自定义滑动指示器切换记录与星声规划；水位环与概率半圆使用 SwiftUI Canvas / Shape trim(from:to:) 动画绘制。'],
+          ['本地导入无门槛', '支持文件选择器直接读取官方 JSON 或导出备份，并复用 WaveShelf 概率模型实时在端侧重算 P50/P80/P95。'],
+          ['数据语义徽章', '不歪/歪/大保底与出货进度条严格按阈值着色，确保 390pt 宽度下一屏看全近期 5 条出货分布。']
+        ],
+        calc: [
+          ['原生 SwiftUI + JavaScriptCore', '彻底告别 WebView 套壳：UI 由 100% 原生 SwiftUI 构建，底层计算直接调用 iOS 系统内置 JSContext 跑 WaveShelf 现有 TS 伤害引擎。'],
+          ['Swift Charts 堆叠占比与成长曲', '整队占比条使用 BarMark(x: .value(...)) 横向堆叠；下方曲线使用对比折线标注「持有基准」与「沙盒预览」。'],
+          ['解决手机端 Tooltip 痛点', '桌面端悬停 Tooltip 在 iOS 上改为「可展开轮切步骤 + 原生 Bottom Sheet 6 大乘区拆解」，大拇指单手可舒适点按查看每一步 Buff 来源。']
+        ]
+      };
+
+      /* ---------- 2. 全局状态 ---------- */
+      var state = {
+        view: 'home',
+        filterEl: 'all',
+        sortBy: 'score',
+        gachaPool: 'charEvent',
+        teamId: 'aemeath',
+        axisMode: 'loop',
+        envMode: 'tower',
+        goldBudget: 2,
+        sandboxSlot: 0,
+        sandboxMembers: [],
+        checkedIn: false,
+        waveplateAlert: true
+      };
+
+      function initSandboxForTeam(teamId) {
+        var t = TEAM_DATA[teamId];
+        state.sandboxSlot = 0;
+        state.sandboxMembers = t.members.map(function (m) {
+          return { chain: m.baseChain, weapon: m.baseWeapon, refine: m.baseRefine, echo: m.baseEcho };
+        });
+      }
+      initSandboxForTeam(state.teamId);
+
+      /* ---------- 3. 通用工具 ---------- */
+      function fmtInt(n) {
+        return Math.round(n).toLocaleString('en-US');
+      }
+
+      var toastTimer = null;
+      function showToast(msg) {
+        var el = document.getElementById('phone-toast');
+        if (!el) return;
+        el.textContent = msg;
+        el.classList.add('is-visible');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () {
+          el.classList.remove('is-visible');
+        }, 2100);
+      }
+
+      /* ---------- 4. 主题切换 (dark-mode-toggle) ---------- */
+      function applyTheme(choice) {
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        if (choice === 'light' || choice === 'dark') {
+          if (meta) meta.setAttribute('content', choice);
+          document.documentElement.dataset.theme = choice;
+        } else {
+          if (meta) meta.setAttribute('content', 'light dark');
+          document.documentElement.dataset.theme = 'system';
+        }
+        try { localStorage.setItem('waveshelf-proto-theme', choice); } catch (e) {}
+        document.querySelectorAll('[data-theme-choice]').forEach(function (btn) {
+          btn.setAttribute('aria-pressed', String(btn.dataset.themeChoice === choice));
+        });
+      }
+
+      document.querySelectorAll('[data-theme-choice]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          applyTheme(btn.dataset.themeChoice);
+        });
+      });
+
+      document.getElementById('mobile-theme-cycle').addEventListener('click', function () {
+        var cur = document.documentElement.dataset.theme || 'system';
+        var next = cur === 'light' ? 'dark' : cur === 'dark' ? 'system' : 'light';
+        applyTheme(next);
+        showToast('主题：' + (next === 'system' ? '跟随系统' : next === 'light' ? '浅色' : '深色'));
+      });
+
+      applyTheme(document.documentElement.dataset.theme || 'system');
+
+      /* ---------- 5. <dialog> Light-Dismiss 兼容封装 (Safari fallback) ---------- */
+      function setupDialog(dialogEl) {
+        if (!('closedBy' in HTMLDialogElement.prototype)) {
+          dialogEl.addEventListener('click', function (e) {
+            if (e.target !== dialogEl) return;
+            var rect = dialogEl.getBoundingClientRect();
+            var inDialog = (
+              e.clientX >= rect.left &&
+              e.clientX <= rect.right &&
+              e.clientY >= rect.top &&
+              e.clientY <= rect.bottom
+            );
+            if (!inDialog) dialogEl.close('dismiss');
+          });
+        }
+      }
+
+      document.querySelectorAll('dialog.ios-sheet').forEach(setupDialog);
+      document.querySelectorAll('[data-close-dialog]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var dlg = document.getElementById(btn.dataset.closeDialog);
+          if (dlg && dlg.open) dlg.close('button');
+        });
+      });
+
+      /* ---------- 6. ARIA Tabs 初始化 (tabs 指南规范: hidden="until-found", beforematch, scroll fade) ---------- */
+      function initTabs(tablistEl) {
+        var tabs = Array.prototype.slice.call(tablistEl.querySelectorAll('[role="tab"]'));
+        var panelMap = {};
+        tabs.forEach(function (tab) {
+          var panel = document.querySelector('[role="tabpanel"][aria-labelledby="' + tab.id + '"]');
+          if (panel) panelMap[tab.id] = panel;
+        });
+
+        function updateScrollFade() {
+          var maxScroll = tablistEl.scrollWidth - tablistEl.clientWidth;
+          if (maxScroll <= 2) {
+            tablistEl.style.setProperty('--fade-start', '0px');
+            tablistEl.style.setProperty('--fade-end', '0px');
+            return;
+          }
+          tablistEl.style.setProperty('--fade-start', tablistEl.scrollLeft > 4 ? '18px' : '0px');
+          tablistEl.style.setProperty('--fade-end', tablistEl.scrollLeft < maxScroll - 4 ? '18px' : '0px');
+        }
+
+        function activate(targetTab) {
+          tabs.forEach(function (t) {
+            var isTarget = t === targetTab;
+            t.setAttribute('aria-selected', String(isTarget));
+            t.tabIndex = isTarget ? 0 : -1;
+            var p = panelMap[t.id];
+            if (p) {
+              if (isTarget) p.removeAttribute('hidden');
+              else p.setAttribute('hidden', 'until-found');
+            }
+          });
+          targetTab.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' });
+          setTimeout(updateScrollFade, 160);
+        }
+
+        tabs.forEach(function (tab, idx) {
+          tab.tabIndex = tab.getAttribute('aria-selected') === 'true' ? 0 : -1;
+          tab.addEventListener('click', function () { activate(tab); });
+          tab.addEventListener('keydown', function (e) {
+            var nextIdx = -1;
+            if (e.key === 'ArrowRight') nextIdx = (idx + 1) % tabs.length;
+            else if (e.key === 'ArrowLeft') nextIdx = (idx - 1 + tabs.length) % tabs.length;
+            else if (e.key === 'Home') nextIdx = 0;
+            else if (e.key === 'End') nextIdx = tabs.length - 1;
+            if (nextIdx >= 0) {
+              e.preventDefault();
+              activate(tabs[nextIdx]);
+              tabs[nextIdx].focus();
+            }
+          });
+          var p = panelMap[tab.id];
+          if (p) {
+            p.addEventListener('beforematch', function () { activate(tab); });
+          }
+        });
+
+        tablistEl.addEventListener('scroll', updateScrollFade, { passive: true });
+        window.addEventListener('resize', updateScrollFade);
+        updateScrollFade();
+      }
+
+      document.querySelectorAll('[role="tablist"]').forEach(initTabs);
+
+      /* ---------- 7. 页面导航与 SwiftUI 说明同步 ---------- */
+      function renderSpecPanel() {
+        var titles = {
+          home: '总览 · 原生 SwiftUI 映射',
+          roles: '角色 · 原生 SwiftUI 映射',
+          gacha: '唤取 · 原生 SwiftUI 映射',
+          calc: '伤害计算 · 原生 SwiftUI 映射'
+        };
+        document.getElementById('spec-panel-title').textContent = titles[state.view];
+        var list = SWIFTUI_SPECS[state.view] || [];
+        document.getElementById('spec-panel-body').innerHTML = list.map(function (item) {
+          return '<div class="spec-item"><strong>' + item[0] + '</strong>' + item[1] + '</div>';
+        }).join('');
+      }
+
+      function switchView(viewName) {
+        state.view = viewName;
+        document.querySelectorAll('.view-pane').forEach(function (p) {
+          p.classList.toggle('is-active', p.id === 'view-' + viewName);
+        });
+        document.querySelectorAll('.section-nav-btn').forEach(function (b) {
+          if (b.dataset.view === viewName) b.setAttribute('aria-current', 'page');
+          else b.removeAttribute('aria-current');
+        });
+        document.querySelectorAll('[data-studio-view]').forEach(function (b) {
+          b.classList.toggle('is-active', b.dataset.studioView === viewName);
+        });
+        var scroller = document.getElementById('phone-scroll');
+        if (scroller) scroller.scrollTop = 0;
+        renderSpecPanel();
+      }
+
+      document.querySelectorAll('.section-nav-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () { switchView(btn.dataset.view); });
+      });
+      document.querySelectorAll('[data-studio-view]').forEach(function (btn) {
+        btn.addEventListener('click', function () { switchView(btn.dataset.studioView); });
+      });
+      document.querySelectorAll('[data-jump-view]').forEach(function (btn) {
+        btn.addEventListener('click', function () { switchView(btn.dataset.jumpView); });
+      });
+
+      document.getElementById('toggle-spec-btn').addEventListener('click', function () {
+        var panel = document.getElementById('spec-panel');
+        var isHidden = panel.hasAttribute('hidden');
+        if (isHidden) {
+          panel.removeAttribute('hidden');
+          this.setAttribute('aria-pressed', 'true');
+        } else {
+          panel.setAttribute('hidden', '');
+          this.setAttribute('aria-pressed', 'false');
+        }
+      });
+
+      document.querySelectorAll('[data-dock]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var tab = btn.dataset.dock;
+          if (tab !== 'wuwa') {
+            showToast('当前原型聚焦 Relay 第 3 Tab「鸣潮」');
+          }
+        });
+      });
+
+      /* ---------- 8. 顶栏按钮 & 首页交互 ---------- */
+      document.getElementById('sync-btn').addEventListener('click', function () {
+        var btn = this;
+        btn.classList.add('is-spinning');
+        setTimeout(function () { btn.classList.remove('is-spinning'); }, 720);
+        var now = new Date();
+        var hh = String(now.getHours()).padStart(2, '0');
+        var mm = String(now.getMinutes()).padStart(2, '0');
+        document.getElementById('sync-time-label').textContent = '更新于 ' + hh + ':' + mm;
+        showToast('已通过原生 URLSession 同步最新面板');
+      });
+
+      document.getElementById('account-btn').addEventListener('click', function () {
+        document.getElementById('account-dialog').showModal();
+      });
+
+      document.getElementById('mock-import-token').addEventListener('click', function () {
+        document.getElementById('account-dialog').close('action');
+        showToast('Token 格式校验通过，已安全写入 Keychain');
+      });
+
+      document.getElementById('mock-import-gacha').addEventListener('click', function () {
+        document.getElementById('account-dialog').close('action');
+        showToast('已导入 886 条历史唤取记录');
+      });
+
+      document.getElementById('waveplate-alert-switch').addEventListener('click', function () {
+        state.waveplateAlert = !state.waveplateAlert;
+        this.setAttribute('aria-checked', String(state.waveplateAlert));
+        showToast(state.waveplateAlert ? '已开启波片 200 本地推送提醒' : '已关闭波片推送提醒');
+      });
+
+      document.getElementById('checkin-btn').addEventListener('click', function () {
+        if (state.checkedIn) {
+          showToast('今日已完成库街区签到');
+          return;
+        }
+        state.checkedIn = true;
+        this.textContent = '今日已签';
+        this.classList.add('is-done');
+        document.getElementById('checkin-desc').textContent = '今日奖励已领取 · 已连签 24 天';
+        showToast('签到成功：贝币 ×15,000');
+      });
+
+      /* ---------- 9. 角色网格 & 面板 Bottom Sheet ---------- */
+      function renderHomeTopResonators() {
+        var top4 = RESONATORS.slice(0, 4);
+        document.getElementById('home-top-resonators').innerHTML = top4.map(function (r) {
+          var el = ELEMENTS[r.element];
+          return (
+            '<button type="button" class="quick-res-card" data-open-res="' + r.id + '">' +
+              '<div class="quick-res-top">' +
+                '<span class="crest" style="background:' + el.color + ';">' + r.name.slice(0, 1) + '</span>' +
+                '<span class="badge ' + (r.grade === 'S+' ? 'badge-ok' : 'badge-warn') + '">' + r.grade + '</span>' +
+              '</div>' +
+              '<div>' +
+                '<div class="res-name">' + r.name + '</div>' +
+                '<div class="res-sub num">' + r.chain + '链 · ' + r.score.toFixed(1) + '</div>' +
+              '</div>' +
+            '</button>'
+          );
+        }).join('');
+      }
+
+      function renderRolesGrid() {
+        var list = RESONATORS.filter(function (r) {
+          return state.filterEl === 'all' || r.element === state.filterEl;
+        }).slice();
+
+        list.sort(function (a, b) {
+          if (state.sortBy === 'chain') return b.chain - a.chain || b.score - a.score;
+          if (state.sortBy === 'level') return b.level - a.level || b.score - a.score;
+          return b.score - a.score;
+        });
+
+        document.getElementById('roles-grid').innerHTML = list.map(function (r) {
+          var el = ELEMENTS[r.element];
+          var badgeCls = r.grade === 'S+' ? 'badge-ok' : r.grade === 'S' ? 'badge-warn' : 'badge-neutral';
+          return (
+            '<button type="button" class="res-card" data-open-res="' + r.id + '">' +
+              '<div class="res-card-wash" style="background: linear-gradient(180deg, ' + el.color + ', transparent);"></div>' +
+              '<div class="res-card-head">' +
+                '<span class="crest" style="background:' + el.color + ';">' + r.name.slice(0, 1) + '</span>' +
+                '<div style="min-width: 0;">' +
+                  '<div class="res-name">' + r.name + '</div>' +
+                  '<div class="res-sub num">Lv.' + r.level + ' · ' + r.chain + '链</div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="res-weapon">' + r.weapon + '</div>' +
+              '<div class="res-card-foot">' +
+                '<span class="res-score-val num">' + r.score.toFixed(1) + '</span>' +
+                '<span class="badge ' + badgeCls + '">' + r.grade + '</span>' +
+              '</div>' +
+            '</button>'
+          );
+        }).join('');
+      }
+
+      function openResonatorSheet(resId) {
+        var r = RESONATORS.find(function (item) { return item.id === resId; });
+        if (!r) return;
+        var el = ELEMENTS[r.element];
+        document.getElementById('res-dialog-crest').textContent = r.name.slice(0, 1);
+        document.getElementById('res-dialog-crest').style.background = el.color;
+        document.getElementById('res-dialog-title').textContent = r.name;
+        document.getElementById('res-dialog-sub').textContent = el.label + ' · ' + r.weaponType + ' · Lv.' + r.level + ' · ' + r.chain + '链';
+
+        var chainsHtml = '';
+        for (var i = 1; i <= 6; i++) {
+          var on = i <= r.chain;
+          chainsHtml += '<div class="chain-node' + (on ? ' is-on' : '') + '" style="' + (on ? 'background:' + el.color : '') + '">' + i + '链</div>';
+        }
+
+        var trendPts = r.trend.map(function (v, idx) {
+          var x = 10 + idx * 78;
+          var y = 46 - ((v - 140) / 105) * 34;
+          return x + ',' + y.toFixed(1);
+        }).join(' ');
+
+        var echoesHtml = r.echoes.map(function (ec) {
+          var subs = ec.subs.map(function (s) {
+            return '<span class="sub-' + s[1] + ' num">' + s[0] + '</span>';
+          }).join('');
+          return (
+            '<div class="echo-row">' +
+              '<div class="list-row-head">' +
+                '<strong>' + ec.name + '</strong>' +
+                '<span class="num">' + ec.main + ' · <strong>' + ec.score.toFixed(1) + '</strong></span>' +
+              '</div>' +
+              '<div class="echo-subs">' + subs + '</div>' +
+            '</div>'
+          );
+        }).join('');
+
+        document.getElementById('res-dialog-body').innerHTML =
+          '<div class="stat-table num">' +
+            '<div><div class="metric-label">攻击力</div><strong>' + r.stats.atk + '</strong></div>' +
+            '<div><div class="metric-label">暴击率</div><strong>' + r.stats.cr + '</strong></div>' +
+            '<div><div class="metric-label">暴击伤害</div><strong>' + r.stats.cd + '</strong></div>' +
+            '<div><div class="metric-label">共鸣效率</div><strong>' + r.stats.er + '</strong></div>' +
+            '<div><div class="metric-label">' + el.label + '伤害</div><strong>' + r.stats.dmg + '</strong></div>' +
+            '<div><div class="metric-label">生命值</div><strong>' + r.stats.hp + '</strong></div>' +
+          '</div>' +
+          '<div class="list-row-head" style="margin-bottom: 4px;"><span style="font-size:13px;font-weight:600;">武器与共鸣链</span><span class="num" style="font-size:12px;color:var(--text-secondary);">' + r.weapon + '</span></div>' +
+          '<div class="chain-strip num">' + chainsHtml + '</div>' +
+          '<div style="margin: 8px 0 12px;">' +
+            '<div class="spark-head"><span>声骸评分成长轨迹</span><span class="num">当前 ' + r.score.toFixed(1) + ' (' + r.grade + ')</span></div>' +
+            '<svg width="100%" height="54" viewBox="0 0 332 54">' +
+              '<polyline fill="none" stroke="' + el.color + '" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" points="' + trendPts + '"/>' +
+            '</svg>' +
+          '</div>' +
+          '<div style="font-size:13px;font-weight:600;margin-bottom:6px;">声骸装配 (4-3-3-1-1)</div>' +
+          echoesHtml +
+          '<button type="button" class="cta-pill" style="width:100%;margin-top:12px;padding:11px;" id="res-goto-calc" data-team-jump="' + r.teamId + '">在伤害计算实验室中打开</button>';
+
+        document.getElementById('res-goto-calc').addEventListener('click', function () {
+          var teamId = this.dataset.teamJump;
+          document.getElementById('resonator-dialog').close('jump');
+          selectTeam(teamId);
+          switchView('calc');
+        });
+
+        document.getElementById('resonator-dialog').showModal();
+      }
+
+      document.addEventListener('click', function (e) {
+        var card = e.target.closest('[data-open-res]');
+        if (card) openResonatorSheet(card.dataset.openRes);
+      });
+
+      document.querySelectorAll('#element-filters .chip-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          state.filterEl = btn.dataset.el;
+          document.querySelectorAll('#element-filters .chip-btn').forEach(function (b) {
+            b.setAttribute('aria-pressed', String(b === btn));
+          });
+          renderRolesGrid();
+        });
+      });
+
+      document.getElementById('role-sort-select').addEventListener('change', function () {
+        state.sortBy = this.value;
+        renderRolesGrid();
+      });
+
+      /* ---------- 10. 唤取与星声规划 ---------- */
+      function renderGachaHistory() {
+        var data = GACHA_POOLS[state.gachaPool];
+        var arcLen = 245;
+        var ratio = Math.min(1, data.pity / data.max);
+        var arc = document.getElementById('gacha-ring-arc');
+        arc.style.strokeDashoffset = (arcLen * (1 - ratio)).toFixed(1);
+        arc.style.stroke = data.pity >= 66 ? 'var(--danger)' : data.pity >= 40 ? 'var(--warn)' : 'var(--ok)';
+
+        document.getElementById('gacha-pity-num').textContent = data.pity;
+        document.getElementById('gacha-total-pulls').textContent = data.total;
+        document.getElementById('gacha-avg-pulls').textContent = data.avg;
+        document.getElementById('gacha-win-rate').textContent = data.winRate;
+        document.getElementById('gacha-guarantee-badge').innerHTML =
+          '<span class="badge ' + (data.guarantee ? 'badge-warn' : 'badge-neutral') + '">' + data.guaranteeLabel + '</span>';
+
+        document.getElementById('gacha-history-list').innerHTML = data.items.map(function (it) {
+          var barColor = it.pulls <= 35 ? 'var(--ok)' : it.pulls <= 65 ? 'var(--warn)' : 'var(--danger)';
+          var widthPct = Math.max(18, Math.min(100, (it.pulls / 80) * 100));
+          return (
+            '<div class="pull-item">' +
+              '<div><strong>' + it.name + '</strong><div class="metric-label num">' + it.date + '</div></div>' +
+              '<div class="pull-bar-bg"><div class="pull-bar-fill num" style="width:' + widthPct.toFixed(0) + '%;background:' + barColor + ';">' + it.pulls + '</div></div>' +
+              '<span class="badge badge-' + it.tagType + '">' + it.tag + '</span>' +
+            '</div>'
+          );
+        }).join('');
+      }
+
+      document.querySelectorAll('#gacha-pool-pills .chip-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          state.gachaPool = btn.dataset.pool;
+          document.querySelectorAll('#gacha-pool-pills .chip-btn').forEach(function (b) {
+            b.setAttribute('aria-pressed', String(b === btn));
+          });
+          renderGachaHistory();
+        });
+      });
+
+      var plannerGoal = '0+1';
+      var plannerGuarantee = true;
+
+      function updatePlanner() {
+        var astrite = Number(document.getElementById('plan-astrite').value);
+        var tides = Number(document.getElementById('plan-tides').value);
+        var pity = Number(document.getElementById('plan-pity').value);
+        var avail = Math.floor(astrite / 160) + tides;
+
+        document.getElementById('plan-astrite-val').textContent = fmtInt(astrite) + ' (' + Math.floor(astrite / 160) + ' 抽)';
+        document.getElementById('plan-tides-val').textContent = tides + ' 抽';
+        document.getElementById('plan-pity-val').textContent = pity + ' / 80';
+
+        var charCopies = plannerGoal === '0+0' ? 1 : plannerGoal === '0+1' ? 1 : plannerGoal === '2+1' ? 3 : 7;
+        var hasWeap = plannerGoal !== '0+0';
+
+        // 鸣潮预期抽数近似模型 (角色约 54 抽期望金、歪概率 50% -> 期望 81 抽/UP，大保底省约 27 抽；武器必中约 54 抽)
+        var firstUpMean = plannerGuarantee ? Math.max(8, 56 - pity) : Math.max(16, 83 - pity);
+        var remCopies = Math.max(0, charCopies - 1);
+        var meanNeed = firstUpMean + remCopies * 81 + (hasWeap ? 54 : 0);
+        var stdDev = Math.sqrt(charCopies * 900 + (hasWeap ? 320 : 0));
+
+        var z = (avail - meanNeed) / Math.max(18, stdDev);
+        var prob = Math.round(100 / (1 + Math.exp(-1.7 * z)));
+        prob = Math.max(1, Math.min(99, prob));
+
+        var p50 = Math.max(1, Math.round(meanNeed));
+        var p80 = Math.round(meanNeed + 0.84 * stdDev);
+        var p95 = Math.round(meanNeed + 1.65 * stdDev);
+
+        var gaugeLen = 264;
+        var gaugeArc = document.getElementById('planner-gauge-arc');
+        gaugeArc.style.strokeDashoffset = (gaugeLen * (1 - prob / 100)).toFixed(1);
+        gaugeArc.style.stroke = prob >= 75 ? 'var(--ok)' : prob >= 45 ? 'var(--warn)' : 'var(--danger)';
+
+        document.getElementById('planner-prob-pct').textContent = prob + '%';
+        document.getElementById('planner-summary-line').textContent = '可用 ' + avail + ' 抽 · 已垫 ' + pity + ' 抽 · 目标 ' + plannerGoal;
+        document.getElementById('planner-p50').textContent = p50 + ' 抽';
+        document.getElementById('planner-p80').textContent = p80 + ' 抽';
+        document.getElementById('planner-p95').textContent = p95 + ' 抽';
+      }
+
+      ['plan-astrite', 'plan-tides', 'plan-pity'].forEach(function (id) {
+        document.getElementById(id).addEventListener('input', updatePlanner);
+      });
+
+      document.getElementById('plan-guarantee-switch').addEventListener('click', function () {
+        plannerGuarantee = !plannerGuarantee;
+        this.setAttribute('aria-checked', String(plannerGuarantee));
+        updatePlanner();
+      });
+
+      document.querySelectorAll('#planner-goal-pills .chip-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          plannerGoal = btn.dataset.goal;
+          document.querySelectorAll('#planner-goal-pills .chip-btn').forEach(function (b) {
+            b.setAttribute('aria-pressed', String(b === btn));
+          });
+          updatePlanner();
+        });
+      });
+
+      /* ---------- 11. 伤害计算实验室 ---------- */
+      var CHAIN_SCALE = [0.81, 0.89, 1.0, 1.128, 1.196, 1.28, 1.542];
+      var WEAPON_SCALE = { sig: 1.0, std: 0.84, '4star': 0.72 };
+      var ECHO_SCALE = { '43311_ele': 1.0, '43311_atk': 0.986, '44111': 0.968 };
+
+      function computeTeamMetrics() {
+        var team = TEAM_DATA[state.teamId];
+        var axisMult = state.axisMode === 'burst' ? team.burstFactor : 1.0;
+        var dur = state.axisMode === 'burst' ? team.durBurst : team.durLoop;
+        var envMult = state.envMode === 'holo' ? 0.889 : state.envMode === 'buff' ? 1.185 : 1.0;
+
+        var baseMemberDprs = [];
+        var sbMemberDprs = [];
+
+        team.members.forEach(function (m, idx) {
+          var baseDpr = team.baselineDpr * m.baseShare * axisMult * envMult;
+          baseMemberDprs.push(baseDpr);
+
+          var sb = state.sandboxMembers[idx];
+          var cRatio = CHAIN_SCALE[sb.chain] / CHAIN_SCALE[m.baseChain];
+          var wRatio = (WEAPON_SCALE[sb.weapon] * (1 + (sb.refine - 1) * 0.048)) /
+                       (WEAPON_SCALE[m.baseWeapon] * (1 + (m.baseRefine - 1) * 0.048));
+          var eRatio = ECHO_SCALE[sb.echo] / ECHO_SCALE[m.baseEcho];
+
+          // 辅助/副 C 链数或专武提升会按拐力外溢给主 C
+          var mDpr = baseDpr * cRatio * wRatio * eRatio;
+          sbMemberDprs.push(mDpr);
+        });
+
+        // 2/3 号位提升额外反馈一部分拐力增益给 1 号位
+        team.members.forEach(function (m, idx) {
+          if (idx > 0) {
+            var sb = state.sandboxMembers[idx];
+            var chainDiff = sb.chain - m.baseChain;
+            if (chainDiff !== 0) {
+              sbMemberDprs[0] *= (1 + chainDiff * (idx === 2 ? 0.068 : 0.048));
+            }
+          }
+        });
+
+        var baseTotal = baseMemberDprs.reduce(function (a, b) { return a + b; }, 0);
+        var sbTotal = sbMemberDprs.reduce(function (a, b) { return a + b; }, 0);
+        return {
+          team: team,
+          dur: dur,
+          baseTotal: baseTotal,
+          sbTotal: sbTotal,
+          dps: sbTotal / dur,
+          memberDprs: sbMemberDprs,
+          deltaPct: ((sbTotal - baseTotal) / baseTotal) * 100
+        };
+      }
+
+      function isSandboxModified() {
+        var team = TEAM_DATA[state.teamId];
+        return team.members.some(function (m, idx) {
+          var sb = state.sandboxMembers[idx];
+          return sb.chain !== m.baseChain || sb.weapon !== m.baseWeapon || sb.refine !== m.baseRefine || sb.echo !== m.baseEcho;
+        });
+      }
+
+      function renderCalcLab() {
+        var res = computeTeamMetrics();
+        var team = res.team;
+        var modified = isSandboxModified();
+
+        document.getElementById('calc-hero-label').textContent =
+          (state.axisMode === 'burst' ? '首轮爆发轮伤 DPR' : '整队循环轮伤 DPR');
+        document.getElementById('calc-dpr-val').textContent = fmtInt(res.sbTotal);
+        document.getElementById('calc-dps-val').textContent = fmtInt(res.dps);
+        document.getElementById('calc-dur-val').textContent = res.dur.toFixed(1) + 's';
+        document.getElementById('calc-main-share').textContent = ((res.memberDprs[0] / res.sbTotal) * 100).toFixed(1) + '%';
+
+        var deltaBadge = document.getElementById('calc-delta-badge');
+        var resetBtn = document.getElementById('calc-reset-btn');
+        if (modified && Math.abs(res.deltaPct) >= 0.05) {
+          deltaBadge.hidden = false;
+          resetBtn.hidden = false;
+          var sign = res.deltaPct >= 0 ? '+' : '';
+          deltaBadge.className = 'badge ' + (res.deltaPct >= 0 ? 'badge-ok' : 'badge-danger');
+          deltaBadge.textContent = sign + res.deltaPct.toFixed(1) + '%';
+        } else {
+          deltaBadge.hidden = true;
+          resetBtn.hidden = true;
+        }
+
+        // 堆叠占比条 + 三列成员数据
+        var stackHtml = '';
+        var colsHtml = '';
+        team.members.forEach(function (m, idx) {
+          var el = ELEMENTS[m.element];
+          var sb = state.sandboxMembers[idx];
+          var pct = (res.memberDprs[idx] / res.sbTotal) * 100;
+          stackHtml += '<div class="stack-seg" style="width:' + pct.toFixed(1) + '%;background:' + el.color + ';"></div>';
+          colsHtml +=
+            '<div class="share-member">' +
+              '<div class="share-member-name"><span class="dot" style="background:' + el.color + ';"></span>' + m.name + '</div>' +
+              '<div class="share-member-meta">' + sb.chain + '链 R' + sb.refine + ' · ' + pct.toFixed(1) + '%</div>' +
+              '<div class="num" style="font-size:12px;font-weight:600;">' + fmtInt(res.memberDprs[idx]) + '</div>' +
+            '</div>';
+        });
+        document.getElementById('calc-stack-bar').innerHTML = stackHtml;
+        document.getElementById('calc-share-cols').innerHTML = colsHtml;
+
+        // 历史对比 Sparkline SVG
+        var axisRatio = res.baseTotal / team.baselineDpr;
+        var hist = team.history.map(function (v) { return v * axisRatio; });
+        var allPts = hist.concat([res.sbTotal]);
+        var minV = Math.min.apply(null, allPts) * 0.92;
+        var maxV = Math.max.apply(null, allPts) * 1.06;
+        var coords = hist.map(function (v, idx) {
+          var x = 10 + idx * 62;
+          var y = 50 - ((v - minV) / (maxV - minV)) * 40;
+          return [x, y];
+        });
+        var lastHist = coords[coords.length - 1];
+        var sbY = 50 - ((res.sbTotal - minV) / (maxV - minV)) * 40;
+        var polyStr = coords.map(function (c) { return c[0] + ',' + c[1].toFixed(1); }).join(' ');
+
+        document.getElementById('calc-spark-caption').textContent = modified
+          ? ('基准 ' + fmtInt(res.baseTotal) + ' → 沙盒 ' + fmtInt(res.sbTotal))
+          : ('当前持有基准 ' + fmtInt(res.baseTotal));
+
+        var elMainColor = ELEMENTS[team.members[0].element].color;
+        document.getElementById('calc-sparkline').innerHTML =
+          '<polyline fill="none" stroke="' + elMainColor + '" stroke-opacity="0.55" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="' + polyStr + '"/>' +
+          (modified ? '<line x1="' + lastHist[0] + '" y1="' + lastHist[1].toFixed(1) + '" x2="314" y2="' + sbY.toFixed(1) + '" stroke="var(--ok)" stroke-width="2.2" stroke-dasharray="4 3"/>' : '') +
+          '<circle cx="' + lastHist[0] + '" cy="' + lastHist[1].toFixed(1) + '" r="3.5" fill="' + elMainColor + '"/>' +
+          (modified ? '<circle cx="314" cy="' + sbY.toFixed(1) + '" r="4.5" fill="var(--ok)"/>' : '');
+
+        // Tab 1: 下一金建议
+        var goldData = team.goldPlans[state.goldBudget];
+        var trapEl = document.getElementById('gold-trap-note');
+        if (goldData.trap) {
+          trapEl.hidden = false;
+          trapEl.innerHTML = '<strong>路线纠偏 · </strong>' + goldData.trap;
+        } else {
+          trapEl.hidden = true;
+        }
+
+        document.getElementById('gold-champion-box').innerHTML =
+          '<div class="champion-head">' +
+            '<div>' +
+              '<div class="metric-label">当前预算最优路径</div>' +
+              '<div class="champion-path">' + goldData.champion.title + '</div>' +
+            '</div>' +
+            '<span class="badge badge-ok">' + goldData.champion.gain + '</span>' +
+          '</div>' +
+          '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">' +
+            '<span class="metric-label num">单金效率 ' + goldData.champion.perGold + '</span>' +
+            '<button type="button" class="cta-pill" id="apply-champion-btn">一键套入沙盒预览</button>' +
+          '</div>';
+
+        document.getElementById('apply-champion-btn').addEventListener('click', function () {
+          initSandboxForTeam(state.teamId);
+          goldData.champion.apply.forEach(function (op) {
+            if (typeof op.chain === 'number') state.sandboxMembers[op.slot].chain = op.chain;
+            if (typeof op.refine === 'number') state.sandboxMembers[op.slot].refine = op.refine;
+          });
+          renderCalcLab();
+          showToast('已套用「' + goldData.champion.title + '」至沙盒预览');
+        });
+
+        document.getElementById('gold-alt-list').innerHTML = goldData.alts.map(function (alt) {
+          return (
+            '<div class="list-row">' +
+              '<div class="list-row-head">' +
+                '<span>' + alt.title + '</span>' +
+                '<strong class="num">' + alt.gain + '</strong>' +
+              '</div>' +
+            '</div>'
+          );
+        }).join('');
+
+        // Tab 2: 配装沙盒
+        var activeSlot = state.sandboxSlot;
+        var activeMember = team.members[activeSlot];
+        var activeSb = state.sandboxMembers[activeSlot];
+        document.querySelectorAll('#sandbox-slot-group .seg-btn').forEach(function (b, i) {
+          b.textContent = (i + 1) + '号位 · ' + team.members[i].name;
+          b.setAttribute('aria-pressed', String(i === activeSlot));
+        });
+        document.getElementById('sb-member-title').textContent = activeMember.name + ' · 共鸣链';
+
+        var chainHtml = '';
+        for (var c = 0; c <= 6; c++) {
+          var isBase = c === activeMember.baseChain;
+          chainHtml += '<button type="button" class="chain-btn' + (isBase ? ' is-baseline' : '') + '" data-sb-chain="' + c + '" aria-pressed="' + (c === activeSb.chain) + '">' + c + '链</button>';
+        }
+        document.getElementById('sb-chain-grid').innerHTML = chainHtml;
+
+        document.getElementById('sb-weapon-select').value = activeSb.weapon;
+        document.getElementById('sb-refine-label').textContent = '当前 R' + activeSb.refine + ' (基准 R' + activeMember.baseRefine + ')';
+        var refHtml = '';
+        for (var r = 1; r <= 5; r++) {
+          refHtml += '<button type="button" class="chain-btn" data-sb-refine="' + r + '" aria-pressed="' + (r === activeSb.refine) + '">R' + r + '</button>';
+        }
+        document.getElementById('sb-refine-grid').innerHTML = refHtml;
+        document.getElementById('sb-echo-select').value = activeSb.echo;
+
+        // Tab 3: 词条灵敏度与弱声骸
+        var maxGain = Math.max.apply(null, team.substats.map(function (s) { return s.gain; }));
+        document.getElementById('substat-bars').innerHTML = team.substats.map(function (s) {
+          var w = (s.gain / maxGain) * 100;
+          return (
+            '<div class="bar-row">' +
+              '<span>' + s.label + '</span>' +
+              '<div class="mini-bar" style="height:8px;"><span style="width:' + w.toFixed(0) + '%;background:' + elMainColor + ';"></span></div>' +
+              '<strong class="num" style="text-align:right;">+' + s.gain.toFixed(1) + '%</strong>' +
+            '</div>'
+          );
+        }).join('');
+
+        document.getElementById('weak-echo-box').innerHTML =
+          '<div class="list-row-head">' +
+            '<strong>短板声骸诊断 · ' + team.weakEcho.slot + '</strong>' +
+            '<span class="badge badge-ok">重刷收益 ' + team.weakEcho.gainIfMax + '</span>' +
+          '</div>' +
+          '<p class="metric-label" style="margin:6px 0 0;line-height:1.5;">当前评分 ' + team.weakEcho.score + '（' + team.weakEcho.valid + ' 有效条）。' + team.weakEcho.note + '</p>';
+
+        // Tab 4: 毕业基准与充能体检
+        document.getElementById('grad-score-label').textContent = team.gradScore.toFixed(1) + ' · ' + team.gradLabel;
+        document.getElementById('er-check-list').innerHTML = team.members.map(function (m) {
+          var diff = m.erActual - m.erNeed;
+          var cls = diff >= 3 ? 'badge-ok' : diff >= 0 ? 'badge-warn' : 'badge-danger';
+          var txt = diff >= 3 ? '充裕' : diff >= 0 ? '卡线' : '缺口 ' + Math.abs(diff).toFixed(1) + '%';
+          return (
+            '<div class="list-row">' +
+              '<div class="list-row-head">' +
+                '<span>' + m.name + ' <span class="metric-label">需求 ' + m.erNeed.toFixed(0) + '%</span></span>' +
+                '<span class="num">' + m.erActual.toFixed(1) + '% <span class="badge ' + cls + '">' + txt + '</span></span>' +
+              '</div>' +
+            '</div>'
+          );
+        }).join('');
+
+        // 轮切动作明细 (可点进乘区 Sheet)
+        var stepFactor = res.sbTotal / team.baselineDpr;
+        document.getElementById('rotation-steps-list').innerHTML = team.steps.map(function (st, idx) {
+          var dmg = team.baselineDpr * st.pct * stepFactor;
+          return (
+            '<button type="button" class="step-row" data-step-idx="' + idx + '">' +
+              '<div>' +
+                '<div style="font-size:13px;font-weight:600;">' + st.actor + ' · ' + st.skill + '</div>' +
+                '<div class="metric-label">' + st.buffs.join(' / ') + '</div>' +
+              '</div>' +
+              '<strong class="num" style="font-size:13px;">' + fmtInt(dmg) + '</strong>' +
+              '<span class="badge badge-neutral">' + (st.pct * 100).toFixed(1) + '%</span>' +
+            '</button>'
+          );
+        }).join('');
+      }
+
+      function selectTeam(teamId) {
+        if (!TEAM_DATA[teamId]) return;
+        state.teamId = teamId;
+        initSandboxForTeam(teamId);
+        document.querySelectorAll('#calc-presets .preset-btn').forEach(function (b) {
+          b.setAttribute('aria-pressed', String(b.dataset.team === teamId));
+        });
+        renderCalcLab();
+      }
+
+      document.querySelectorAll('#calc-presets .preset-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () { selectTeam(btn.dataset.team); });
+      });
+
+      document.querySelectorAll('[data-axis]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          state.axisMode = btn.dataset.axis;
+          document.querySelectorAll('[data-axis]').forEach(function (b) {
+            b.setAttribute('aria-pressed', String(b === btn));
+          });
+          renderCalcLab();
+        });
+      });
+
+      document.getElementById('calc-env-select').addEventListener('change', function () {
+        state.envMode = this.value;
+        renderCalcLab();
+      });
+
+      document.getElementById('calc-reset-btn').addEventListener('click', function () {
+        initSandboxForTeam(state.teamId);
+        renderCalcLab();
+        showToast('已还原当前账号持有配装基准');
+      });
+
+      document.querySelectorAll('#gold-budget-group .seg-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          state.goldBudget = Number(btn.dataset.gold);
+          document.querySelectorAll('#gold-budget-group .seg-btn').forEach(function (b) {
+            b.setAttribute('aria-pressed', String(b === btn));
+          });
+          renderCalcLab();
+        });
+      });
+
+      document.querySelectorAll('#sandbox-slot-group .seg-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          state.sandboxSlot = Number(btn.dataset.slot);
+          renderCalcLab();
+        });
+      });
+
+      document.getElementById('sb-chain-grid').addEventListener('click', function (e) {
+        var btn = e.target.closest('[data-sb-chain]');
+        if (!btn) return;
+        state.sandboxMembers[state.sandboxSlot].chain = Number(btn.dataset.sbChain);
+        renderCalcLab();
+      });
+
+      document.getElementById('sb-refine-grid').addEventListener('click', function (e) {
+        var btn = e.target.closest('[data-sb-refine]');
+        if (!btn) return;
+        state.sandboxMembers[state.sandboxSlot].refine = Number(btn.dataset.sbRefine);
+        renderCalcLab();
+      });
+
+      document.getElementById('sb-weapon-select').addEventListener('change', function () {
+        state.sandboxMembers[state.sandboxSlot].weapon = this.value;
+        renderCalcLab();
+      });
+
+      document.getElementById('sb-echo-select').addEventListener('change', function () {
+        state.sandboxMembers[state.sandboxSlot].echo = this.value;
+        renderCalcLab();
+      });
+
+      document.getElementById('rotation-steps-list').addEventListener('click', function (e) {
+        var row = e.target.closest('[data-step-idx]');
+        if (!row) return;
+        var idx = Number(row.dataset.stepIdx);
+        var res = computeTeamMetrics();
+        var st = res.team.steps[idx];
+        var dmg = res.team.baselineDpr * st.pct * (res.sbTotal / res.team.baselineDpr);
+
+        document.getElementById('step-dialog-title').textContent = st.actor + ' · ' + st.skill;
+        document.getElementById('step-dialog-sub').textContent = '期望伤害 ' + fmtInt(dmg) + ' · 占整队 ' + (st.pct * 100).toFixed(1) + '%';
+        document.getElementById('step-dialog-body').innerHTML =
+          '<div class="stat-table num">' +
+            '<div><div class="metric-label">技能倍率区</div><strong>' + st.mult + '</strong></div>' +
+            '<div><div class="metric-label">面板攻击区</div><strong>' + st.atk + '</strong></div>' +
+            '<div><div class="metric-label">伤害加成区</div><strong>' + st.dmg + '</strong></div>' +
+            '<div><div class="metric-label">伤害加深区</div><strong>' + st.deepen + '</strong></div>' +
+            '<div><div class="metric-label">双暴期望</div><strong>' + st.crit + '</strong></div>' +
+            '<div><div class="metric-label">防御抗性区</div><strong>' + st.res + '</strong></div>' +
+          '</div>' +
+          '<div style="font-size:13px;font-weight:600;margin-bottom:6px;">本步生效增益来源</div>' +
+          st.buffs.map(function (bf) {
+            return '<div class="list-row"><div class="list-row-head"><span>' + bf + '</span><span class="badge badge-ok">生效中</span></div></div>';
+          }).join('');
+
+        document.getElementById('step-dialog').showModal();
+      });
+
+      /* ---------- 12. 初始渲染 ---------- */
+      renderHomeTopResonators();
+      renderRolesGrid();
+      renderGachaHistory();
+      updatePlanner();
+      renderCalcLab();
+      renderSpecPanel();
+    })();
+  </script>
+</body>
+</html>

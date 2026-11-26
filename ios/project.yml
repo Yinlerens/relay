@@ -23,6 +23,9 @@ targets:
       - path: Relay
         excludes:
           - "**/.DS_Store"
+          - "Resources/**"
+      - path: Relay/Resources
+        buildPhase: resources
     info:
       path: Relay/Info.plist
       properties:

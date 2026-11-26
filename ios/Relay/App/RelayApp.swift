@@ -4,6 +4,7 @@ import UIKit
 @main
 struct RelayApp: App {
     @State private var store = AppStore()
+    @State private var wuwaStore = WuwaStore()
     @AppStorage(SettingsKey.appearance) private var appearance: AppearanceMode = .system
 
     init() {
@@ -22,9 +23,13 @@ struct RelayApp: App {
         WindowGroup {
             RootView()
                 .environment(store)
+                .environment(wuwaStore)
                 .onAppear {
                     appearance.applyToWindows()
                     NotificationManager.shared.configure()
+                    wuwaStore.onBanner = { [weak store] message, isError in
+                        store?.showBanner(message, isError: isError)
+                    }
                 }
                 .onChange(of: appearance) { _, mode in
                     mode.applyToWindows()

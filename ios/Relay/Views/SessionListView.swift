@@ -15,6 +15,7 @@ enum AgentFilter: Hashable {
 
 struct SessionListView: View {
     @Environment(AppStore.self) private var store
+    @Environment(WuwaStore.self) private var wuwaStore
     @State private var agentPath = NavigationPath()
     @State private var tavernPath = NavigationPath()
     @State private var sessionTrail: [String] = []
@@ -94,6 +95,10 @@ struct SessionListView: View {
             Tab("酒馆", systemImage: "book.pages.fill", value: HomeSection.tavern) {
                 tavernTab
             }
+
+            Tab("鸣潮", systemImage: "waveform.circle.fill", value: HomeSection.wuwa) {
+                WuwaRootView(showSettings: $showSettings)
+            }
         }
         .tabBarMinimizeBehavior(.onScrollDown)
         .tint(store.homeSection == .tavern ? TavernTheme.tint : nil)
@@ -101,6 +106,8 @@ struct SessionListView: View {
             Haptics.selection()
             if newSection == .tavern && store.tavernStatus == nil {
                 Task { await store.loadTavernOverview() }
+            } else if newSection == .wuwa {
+                Task { await wuwaStore.bootstrapIfNeeded() }
             }
         }
         .sheet(isPresented: $showSettings) {

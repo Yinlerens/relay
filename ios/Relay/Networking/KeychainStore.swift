@@ -8,6 +8,8 @@ enum KeychainStore {
     enum Key: String {
         case serverURL
         case bearerToken
+        case kuroSession
+        case kuroDeviceId
     }
 
     static func string(for key: Key) -> String? {

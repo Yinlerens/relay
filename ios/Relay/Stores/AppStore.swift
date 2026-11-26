@@ -19,12 +19,14 @@ struct PairingRequest: Identifiable, Equatable, Sendable {
 enum HomeSection: String, CaseIterable, Identifiable, Sendable {
     case agent
     case tavern
+    case wuwa
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .agent: return "Agent"
         case .tavern: return "酒馆"
+        case .wuwa: return "鸣潮"
         }
     }
 }
