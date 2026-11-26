@@ -27,6 +27,7 @@ struct RelayApp: App {
                 .onAppear {
                     appearance.applyToWindows()
                     NotificationManager.shared.configure()
+                    wuwaStore.relayAPIProvider = { [weak store] in store?.api }
                     wuwaStore.onBanner = { [weak store] message, isError in
                         store?.showBanner(message, isError: isError)
                     }
@@ -43,6 +44,7 @@ struct RelayApp: App {
 
 struct RootView: View {
     @Environment(AppStore.self) private var store
+    @Environment(WuwaStore.self) private var wuwaStore
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -75,6 +77,9 @@ struct RootView: View {
         .task(id: store.isPaired) {
             if store.isPaired {
                 await store.start()
+                if wuwaStore.hasBootstrapped {
+                    await wuwaStore.syncFromRelayServer()
+                }
             }
         }
         .onChange(of: scenePhase) { _, phase in

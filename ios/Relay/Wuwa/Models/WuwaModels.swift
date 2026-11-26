@@ -221,6 +221,33 @@ struct WuwaBackupBundle: Codable, Sendable {
     var pulls: [WuwaPullRecord]
     var settings: [String: String]?
     var catalogStates: [WuwaCatalogState]?
+    var resonatorHistories: [WuwaResonatorHistoryEntry]?
+}
+
+// MARK: - Relay Server Cloud Sync
+
+struct WuwaSyncStats: Codable, Sendable, Equatable {
+    var pullCount: Int
+    var historyCount: Int
+}
+
+struct WuwaSyncPayload: Codable, Sendable {
+    var pulls: [WuwaPullRecord]
+    var histories: [WuwaResonatorHistoryEntry]
+    var stats: WuwaSyncStats
+}
+
+struct WuwaSyncPushRequest: Encodable, Sendable {
+    var pulls: [WuwaPullRecord]?
+    var histories: [WuwaResonatorHistoryEntry]?
+}
+
+struct WuwaSyncPushResponse: Codable, Sendable {
+    var ok: Bool
+    var pullsAdded: Int
+    var pullsTotal: Int
+    var historiesAdded: Int
+    var historiesTotal: Int
 }
 
 // MARK: - Navigation & Sections

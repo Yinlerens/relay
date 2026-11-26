@@ -551,4 +551,31 @@ struct RelayAPI: Sendable {
         }
         return request
     }
+
+    // MARK: WaveShelf (鸣潮) History Sync endpoints
+
+    func fetchWuwaSync(gameRoleId: String? = nil) async throws -> WuwaSyncPayload {
+        var request = authorizedRequest("/api/wuwa/sync")
+        request.timeoutInterval = 45
+        if let gameRoleId, !gameRoleId.isEmpty,
+           let base = request.url,
+           var comps = URLComponents(url: base, resolvingAgainstBaseURL: false) {
+            comps.queryItems = [URLQueryItem(name: "gameRoleId", value: gameRoleId)]
+            request.url = comps.url ?? base
+        }
+        return try await send(request, as: WuwaSyncPayload.self)
+    }
+
+    func pushWuwaSync(
+        pulls: [WuwaPullRecord]? = nil,
+        histories: [WuwaResonatorHistoryEntry]? = nil
+    ) async throws -> WuwaSyncPushResponse {
+        var request = authorizedRequest("/api/wuwa/sync", method: "POST")
+        request.timeoutInterval = 60
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(
+            WuwaSyncPushRequest(pulls: pulls, histories: histories)
+        )
+        return try await send(request, as: WuwaSyncPushResponse.self)
+    }
 }

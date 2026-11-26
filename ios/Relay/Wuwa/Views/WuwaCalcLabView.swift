@@ -27,7 +27,7 @@ struct WuwaCalcLabView: View {
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 14) {
-                if !wuwa.snapshot.loggedIn {
+                if !wuwa.snapshot.loggedIn && wuwa.detailsByRoleId.isEmpty {
                     missingPrompt(
                         title: "登录后解锁伤害计算实验室",
                         detail: "需使用你的真实角色面板、武器与声骸，通过本地引擎实算配队 DPR 与下一步提升路线。",
@@ -69,34 +69,100 @@ struct WuwaCalcLabView: View {
     // MARK: - Preset & Condition Controls
 
     private var presetSelector: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(wuwa.presets) { preset in
-                    let selected = preset.id == wuwa.selectedPresetId
-                    let ready = preset.slots.allSatisfy { wuwa.detailsByRoleId[$0.roleId] != nil }
-                    Button {
-                        Haptics.selection()
-                        wuwa.selectPreset(preset.id)
-                    } label: {
+        let active = currentPreset ?? wuwa.presets.first
+        let readyPresets = wuwa.presets.filter { preset in
+            preset.slots.allSatisfy { wuwa.detailsByRoleId[$0.roleId] != nil }
+        }
+        let incompletePresets = wuwa.presets.filter { preset in
+            !preset.slots.allSatisfy { wuwa.detailsByRoleId[$0.roleId] != nil }
+        }
+
+        return Menu {
+            if !readyPresets.isEmpty {
+                Section("已就绪配队 (\(readyPresets.count))") {
+                    ForEach(readyPresets) { preset in
+                        presetMenuButton(preset: preset, missingCount: 0)
+                    }
+                }
+            }
+            if !incompletePresets.isEmpty {
+                Section("缺少成员面板 (\(incompletePresets.count))") {
+                    ForEach(incompletePresets) { preset in
+                        let missingCount = preset.slots.filter { wuwa.detailsByRoleId[$0.roleId] == nil }.count
+                        presetMenuButton(preset: preset, missingCount: missingCount)
+                    }
+                }
+            }
+        } label: {
+            if let active {
+                let isReady = active.slots.allSatisfy { wuwa.detailsByRoleId[$0.roleId] != nil }
+                HStack(spacing: 10) {
+                    HStack(spacing: -8) {
+                        ForEach(active.slots) { slot in
+                            WuwaRemoteImage(
+                                urlString: wuwa.resonatorIconURL(for: slot.roleId),
+                                fallbackText: slot.name,
+                                tint: Palette.textSecondary,
+                                contentMode: .fill
+                            )
+                            .frame(width: 26, height: 26)
+                            .background(Palette.fieldFill)
+                            .clipShape(Circle())
+                            .overlay(Circle().stroke(Palette.surface, lineWidth: 1.5))
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Circle()
-                                .fill(ready ? Palette.success : Palette.textTertiary)
+                                .fill(isReady ? Palette.success : Palette.warning)
                                 .frame(width: 6, height: 6)
-                            Text(preset.name)
-                            if let variant = preset.variantLabel, !variant.isEmpty {
-                                Text("· \(variant)")
-                                    .opacity(0.78)
+                            Text(active.name)
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(Palette.textPrimary)
+                                .lineLimit(1)
+                            if let variant = active.variantLabel, !variant.isEmpty {
+                                Text(variant)
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundStyle(Color(hex: 0x2B93CF))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(Color(hex: 0x2B93CF).opacity(0.12)))
                             }
                         }
-                        .font(.system(size: 12.5, weight: selected ? .semibold : .medium))
-                        .foregroundStyle(selected ? .white : Palette.textPrimary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Capsule().fill(selected ? Palette.textPrimary : Palette.surface))
-                        .overlay(Capsule().stroke(Palette.hairline, lineWidth: 0.6))
+                        Text(active.slots.map(\.name).joined(separator: " · "))
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(Palette.textSecondary)
+                            .lineLimit(1)
                     }
-                    .buttonStyle(.pressable)
+
+                    Spacer(minLength: 4)
+
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Palette.textSecondary)
                 }
+                .padding(.horizontal, 13)
+                .padding(.vertical, 10)
+                .cardSurface(radius: 16)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func presetMenuButton(preset: WuwaTeamPresetSummary, missingCount: Int) -> some View {
+        let isSelected = preset.id == wuwa.selectedPresetId
+        let variantSuffix = preset.variantLabel.flatMap { $0.isEmpty ? nil : " · \($0)" } ?? ""
+        let missingSuffix = missingCount > 0 ? "（缺 \(missingCount) 人）" : ""
+        let title = "\(preset.name)\(variantSuffix)\(missingSuffix)"
+        return Button {
+            Haptics.selection()
+            wuwa.selectPreset(preset.id)
+        } label: {
+            if isSelected {
+                Label(title, systemImage: "checkmark")
+            } else {
+                Text(title)
             }
         }
     }

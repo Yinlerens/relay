@@ -34,10 +34,24 @@ struct WuwaGachaView: View {
             .padding(.bottom, 28)
         }
         .onAppear {
-            if wuwa.pulls.isEmpty {
+            if !wuwa.isSyncingCloud && wuwa.pulls.isEmpty {
                 mode = .planner
             }
         }
+        .onChange(of: wuwa.pulls.isEmpty) { _, isEmpty in
+            if !isEmpty {
+                mode = .history
+            }
+        }
+        .refreshable {
+            await wuwa.syncFromRelayServer(showToast: true)
+        }
+    }
+
+    private func maskedUid(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 4 else { return trimmed }
+        return "\(trimmed.prefix(3))***\(trimmed.suffix(3))"
     }
 
     // MARK: - History Section
@@ -51,18 +65,31 @@ struct WuwaGachaView: View {
                     .foregroundStyle(Palette.textSecondary)
                 Text("还没有唤取记录")
                     .font(RelayFont.display(20))
-                Text("支持直接粘贴国服唤取记录链接或导入 WaveShelf 备份 JSON。")
+                Text("支持从已配对 Relay 服务端同步 PC 历史、粘贴国服唤取链接或导入备份 JSON。")
                     .font(.system(size: 13))
                     .foregroundStyle(Palette.textSecondary)
                     .multilineTextAlignment(.center)
-                Button("导入唤取记录") {
-                    onOpenImport()
+                HStack(spacing: 10) {
+                    Button("导入唤取记录") {
+                        onOpenImport()
+                    }
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 9)
+                    .background(Capsule().fill(Color(hex: 0x2B93CF)))
+
+                    if wuwa.relayAPIProvider?() != nil {
+                        Button("从 Relay 同步") {
+                            Task { await wuwa.syncFromRelayServer(showToast: true) }
+                        }
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Palette.textPrimary)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 9)
+                        .background(Capsule().fill(Palette.fieldFill))
+                    }
                 }
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 9)
-                .background(Capsule().fill(Color(hex: 0x2B93CF)))
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 44)
@@ -70,6 +97,28 @@ struct WuwaGachaView: View {
             .cardSurface()
         } else {
             let active = wuwa.pools.first(where: { $0.poolType == wuwa.selectedPoolType }) ?? wuwa.pools[0]
+            let playerId = wuwa.pulls.first?.playerId ?? ""
+
+            HStack {
+                Text(playerId.isEmpty ? "全卡池累计 \(wuwa.pulls.count) 抽" : "UID \(maskedUid(playerId)) · 累计 \(wuwa.pulls.count) 抽")
+                    .font(.system(size: 12, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(Palette.textSecondary)
+                Spacer()
+                Button {
+                    Task { await wuwa.syncFromRelayServer(showToast: true) }
+                } label: {
+                    if wuwa.isSyncingCloud {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Label("同步 PC 历史", systemImage: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 11.5, weight: .medium))
+                    }
+                }
+                .foregroundStyle(Color(hex: 0x2B93CF))
+                .disabled(wuwa.isSyncingCloud)
+            }
+            .padding(.horizontal, 4)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -113,7 +162,17 @@ struct WuwaGachaView: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             ForEach(active.limited.upCharacters) { up in
-                                HStack(spacing: 5) {
+                                HStack(spacing: 6) {
+                                    WuwaRemoteImage(
+                                        urlString: wuwa.resonatorIconURL(for: up.resourceId),
+                                        fallbackText: up.name,
+                                        tint: Color(hex: 0x2B93CF),
+                                        contentMode: .fill
+                                    )
+                                    .frame(width: 22, height: 22)
+                                    .background(Palette.surface)
+                                    .clipShape(Circle())
+
                                     Text(up.name)
                                     if up.count > 1 {
                                         Text("×\(up.count)")
@@ -123,8 +182,9 @@ struct WuwaGachaView: View {
                                     }
                                 }
                                 .font(.system(size: 12, weight: .medium))
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
+                                .padding(.leading, 5)
+                                .padding(.trailing, 10)
+                                .padding(.vertical, 4)
                                 .background(Capsule().fill(Palette.fieldFill))
                             }
                         }
@@ -138,40 +198,56 @@ struct WuwaGachaView: View {
         }
     }
 
+    private func nextNoteText(pool: WuwaPoolHistory) -> String {
+        let left = max(0, 80 - pool.currentPity)
+        if pool.guaranteed == true { return "上一金歪了，下一金必 UP · 至多再 \(left) 抽" }
+        if pool.guaranteed == false { return "当前为小保底 · 至多再 \(left) 抽出五星" }
+        return "至多再 \(left) 抽出五星"
+    }
+
     private func pitySummaryCard(pool: WuwaPoolHistory) -> some View {
         let ratio = min(1.0, Double(pool.currentPity) / 80.0)
         let color = pityColor(pool.currentPity)
-        return HStack(spacing: 16) {
-            ZStack {
-                Circle()
-                    .stroke(Palette.fieldFill, lineWidth: 8)
-                Circle()
-                    .trim(from: 0, to: max(0.01, ratio))
-                    .stroke(color, style: StrokeStyle(lineWidth: 8, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                VStack(spacing: 1) {
-                    Text("\(pool.currentPity)")
-                        .font(RelayFont.display(24))
-                        .monospacedDigit()
-                    Text("/ 80 抽")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(Palette.textSecondary)
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 16) {
+                ZStack {
+                    Circle()
+                        .stroke(Palette.fieldFill, lineWidth: 8)
+                    Circle()
+                        .trim(from: 0, to: max(0.01, ratio))
+                        .stroke(color, style: StrokeStyle(lineWidth: 8, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                    VStack(spacing: 1) {
+                        Text("\(pool.currentPity)")
+                            .font(RelayFont.display(24))
+                            .monospacedDigit()
+                        Text("/ 80 抽")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(Palette.textSecondary)
+                    }
                 }
-            }
-            .frame(width: 92, height: 92)
+                .frame(width: 92, height: 92)
 
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 10) {
-                statCell("累计抽数", "\(pool.total)")
-                if pool.limited.enabled {
-                    statCell("UP 均抽", pool.limited.averagePullsPerUp.map { String(format: "%.1f", $0) } ?? "—")
-                    statCell("不歪率", pool.limited.smallPityWinRate.map { String(format: "%.1f%%", $0 * 100) } ?? "—")
-                    statCell("当前保底", pool.guaranteed == true ? "大保底" : "小保底")
-                } else {
-                    statCell("五星总数", "\(pool.fiveStars.count)")
-                    statCell("平均出金", pool.averagePity.map { String(format: "%.1f", $0) } ?? "—")
-                    statCell("四星总数", "\(pool.fourStars)")
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 10) {
+                    statCell("累计抽数", "\(pool.total)")
+                    statCell("五星 / 四星", "\(pool.fiveStars.count) / \(pool.fourStars)")
+                    if pool.limited.enabled {
+                        statCell("UP 均抽", pool.limited.averagePullsPerUp.map { String(format: "%.1f 抽", $0) } ?? "—")
+                        let winText = pool.limited.smallPityWinRate.map {
+                            "\(String(format: "%.1f%%", $0 * 100)) (\(pool.limited.smallPityWins)/\(pool.limited.smallPityAttempts))"
+                        } ?? "—"
+                        statCell("小保底不歪", winText)
+                    } else {
+                        statCell("平均出金", pool.averagePity.map { String(format: "%.1f 抽", $0) } ?? "—")
+                        statCell("四星总数", "\(pool.fourStars)")
+                    }
                 }
             }
+
+            Text(nextNoteText(pool: pool))
+                .font(.system(size: 12, weight: .medium))
+                .monospacedDigit()
+                .foregroundStyle(pool.guaranteed == true ? Palette.warning : Palette.textSecondary)
         }
         .padding(16)
         .cardSurface()
@@ -183,8 +259,10 @@ struct WuwaGachaView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(Palette.textSecondary)
             Text(val)
-                .font(.system(size: 14.5, weight: .semibold))
+                .font(.system(size: 14, weight: .semibold))
                 .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
         }
     }
 
@@ -194,23 +272,80 @@ struct WuwaGachaView: View {
                 Text("五星出货记录")
                     .font(.system(size: 15, weight: .semibold))
                 Spacer()
-                Text("\(pool.fiveStars.count) 次")
+                Text("\(pool.fiveStars.count) 次 · 时间倒序")
                     .font(.system(size: 12))
+                    .monospacedDigit()
                     .foregroundStyle(Palette.textSecondary)
             }
 
+            // 当前进行中的垫抽进度条（与 PC 端保持一致）
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(Palette.fieldFill)
+                    .frame(width: 30, height: 30)
+                    .overlay(
+                        Text("?")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(Palette.textSecondary)
+                    )
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("下一个五星")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(Palette.textPrimary)
+                    Text(pool.guaranteed == true ? "大保底进行中" : "进行中")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(pool.guaranteed == true ? Palette.warning : Palette.textTertiary)
+                }
+                .frame(width: 82, alignment: .leading)
+
+                GeometryReader { geo in
+                    let pColor = pityColor(pool.currentPity)
+                    let ratio = min(1.0, Double(pool.currentPity) / 80.0)
+                    let w = pool.currentPity > 0 ? max(CGFloat(26), geo.size.width * CGFloat(ratio)) : CGFloat(24)
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Palette.fieldFill)
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(pColor.opacity(pool.currentPity > 0 ? 0.85 : 0.25))
+                            .frame(width: w)
+                        Text("\(pool.currentPity)")
+                            .font(.system(size: 11, weight: .bold))
+                            .monospacedDigit()
+                            .foregroundStyle(pool.currentPity > 0 ? .white : Palette.textSecondary)
+                            .padding(.leading, max(CGFloat(6), w - 22))
+                    }
+                }
+                .frame(height: 18)
+
+                Spacer().frame(width: pool.limited.enabled ? 36 : 0)
+            }
+            .padding(.vertical, 3)
+
             if pool.fiveStars.isEmpty {
-                Text("该卡池暂无五星记录。")
+                Divider().overlay(Palette.hairline)
+                Text("该卡池还没有出过五星。")
                     .font(.system(size: 13))
                     .foregroundStyle(Palette.textSecondary)
             } else {
-                ForEach(Array(pool.fiveStars.enumerated()), id: \.element.id) { idx, entry in
-                    if idx > 0 { Divider().overlay(Palette.hairline) }
+                ForEach(pool.fiveStars) { entry in
+                    Divider().overlay(Palette.hairline)
                     let pColor = pityColor(entry.pulls)
                     HStack(spacing: 10) {
+                        WuwaRemoteImage(
+                            urlString: wuwa.gachaItemIconURL(for: entry.record),
+                            fallbackText: entry.record.name,
+                            tint: pColor,
+                            contentMode: .fill
+                        )
+                        .frame(width: 30, height: 30)
+                        .background(Palette.fieldFill)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
                         VStack(alignment: .leading, spacing: 2) {
                             Text(entry.record.name)
                                 .font(.system(size: 13, weight: .semibold))
+                                .lineLimit(1)
                             Text(String(entry.record.pulledAt.prefix(10)))
                                 .font(.system(size: 10.5))
                                 .monospacedDigit()
@@ -264,8 +399,8 @@ struct WuwaGachaView: View {
     }
 
     private func pityColor(_ pulls: Int) -> Color {
-        if pulls <= 35 { return Palette.success }
-        if pulls <= 65 { return Palette.warning }
+        if pulls < 50 { return Palette.success }
+        if pulls < 70 { return Palette.warning }
         return Palette.danger
     }
 

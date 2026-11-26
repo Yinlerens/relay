@@ -277,4 +277,92 @@ final class WuwaEngineTests: XCTestCase {
         XCTAssertEqual(h3.count, 2)
         XCTAssertEqual(h3[0].recordedAt, "2026-11-22T10:00:00Z")
     }
+
+    func testStorageMergesPCHistoryWithNanosecondTimestampsAndDeduplicates() async throws {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("wuwa-merge-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let storage = WuwaStorage(directory: tmpDir)
+
+        let details = makeAimisiTeamDetails()
+        let baseAimisi = try XCTUnwrap(details["1210"])
+        var upgradedAimisi = baseAimisi
+        upgradedAimisi.echoes[0].subProps.append(prop("暴击伤害", "12.6%"))
+
+        let fpA = WuwaStorage.computeFingerprint(for: baseAimisi)
+        let fpB = WuwaStorage.computeFingerprint(for: upgradedAimisi)
+        XCTAssertNotEqual(fpA, fpB)
+
+        // Seed an iOS snapshot matching fpB at a later ISO timestamp
+        _ = await storage.saveDetail(gameRoleId: "100385406", detail: upgradedAimisi, recordedAt: "2026-11-26T09:00:00Z")
+
+        // Verify 9-digit Rust Chrono timestamp parses cleanly
+        XCTAssertNotNil(WuwaStorage.parseISO8601Timestamp("2026-11-13T20:00:26.978519300+00:00"))
+
+        // Import PC history containing earlier fpA -> fpB (nanosecond timestamps) + returning to fpA later
+        let pcEntries: [WuwaResonatorHistoryEntry] = [
+            WuwaResonatorHistoryEntry(
+                id: 1,
+                gameRoleId: "100385406",
+                resonatorId: 1210,
+                fingerprint: fpA,
+                recordedAt: "2026-11-13T20:00:26.978519300+00:00",
+                level: 90,
+                chainLevel: 3,
+                weaponName: "永远的启明星",
+                weaponLevel: 90,
+                weaponResonanceLevel: 1,
+                attributes: baseAimisi.attributes,
+                echoes: baseAimisi.echoes,
+                detail: baseAimisi
+            ),
+            WuwaResonatorHistoryEntry(
+                id: 2,
+                gameRoleId: "100385406",
+                resonatorId: 1210,
+                fingerprint: fpB,
+                recordedAt: "2026-11-22T18:33:39.123456700+00:00",
+                level: 90,
+                chainLevel: 3,
+                weaponName: "永远的启明星",
+                weaponLevel: 90,
+                weaponResonanceLevel: 1,
+                attributes: upgradedAimisi.attributes,
+                echoes: upgradedAimisi.echoes,
+                detail: upgradedAimisi
+            ),
+            WuwaResonatorHistoryEntry(
+                id: 3,
+                gameRoleId: "100385406",
+                resonatorId: 1210,
+                fingerprint: fpA,
+                recordedAt: "2026-11-27T01:00:00Z",
+                level: 90,
+                chainLevel: 3,
+                weaponName: "永远的启明星",
+                weaponLevel: 90,
+                weaponResonanceLevel: 1,
+                attributes: baseAimisi.attributes,
+                echoes: baseAimisi.echoes,
+                detail: baseAimisi
+            ),
+        ]
+
+        let merged = await storage.mergeHistories(gameRoleId: "100385406", incoming: pcEntries)
+        let list = try XCTUnwrap(merged.byRoleId[1210])
+        // fpB from PC (11-22) and local fpB (11-26) fold into 1 entry keeping earlier timestamp (11-22); A->B->A retains 3 entries
+        XCTAssertEqual(list.count, 3)
+        XCTAssertEqual(list[0].fingerprint, fpA)
+        XCTAssertEqual(list[0].recordedAt, "2026-11-27T01:00:00Z")
+        XCTAssertEqual(list[1].fingerprint, fpB)
+        XCTAssertEqual(list[1].recordedAt, "2026-11-22T18:33:39.123456700+00:00")
+        XCTAssertEqual(list[2].fingerprint, fpA)
+        XCTAssertEqual(list[2].recordedAt, "2026-11-13T20:00:26.978519300+00:00")
+
+        // Verify JS engine timeline calculation works on the merged multi-snapshot history
+        let timeline = try await WuwaJSEngine.shared.buildResonatorTimeline(detail: baseAimisi, history: list)
+        XCTAssertEqual(timeline.count, 3)
+        XCTAssertTrue(timeline.last?.isBaseline == true)
+        XCTAssertNotNil(timeline[0].scoreDelta)
+        XCTAssertGreaterThan(timeline[1].score, timeline[2].score)
+    }
 }

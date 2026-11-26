@@ -51,11 +51,25 @@ struct WuwaAccountSheet: View {
                     }
                 }
 
-                Section("本地离线数据") {
+                Section("本地与云端历史数据") {
                     LabeledContent("已缓存角色面板", value: "\(wuwa.detailsByRoleId.count) 位")
                     LabeledContent("声骸历史快照", value: "\(wuwa.historyByRoleId.values.reduce(0) { $0 + $1.count }) 条")
                     LabeledContent("本地唤取记录", value: "\(wuwa.pulls.count) 条")
-                    Button("导入 / 导出唤取记录") {
+                    if wuwa.relayAPIProvider?() != nil {
+                        Button {
+                            Task { await wuwa.syncFromRelayServer(showToast: true) }
+                        } label: {
+                            HStack {
+                                Text("从 Relay 服务端同步 PC 历史")
+                                Spacer()
+                                if wuwa.isSyncingCloud {
+                                    ProgressView().controlSize(.small)
+                                }
+                            }
+                        }
+                        .disabled(wuwa.isSyncingCloud)
+                    }
+                    Button("导入 / 导出唤取备份") {
                         onOpenGachaImport()
                     }
                 }

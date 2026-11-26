@@ -124,6 +124,114 @@ actor WuwaStorage {
         return out
     }
 
+    func loadAllHistoriesList(gameRoleId: String) -> [WuwaResonatorHistoryEntry] {
+        loadAllHistories(gameRoleId: gameRoleId).values.flatMap { $0 }
+    }
+
+    /// Merges incoming history snapshots (e.g. from PC `waveshelf.db` via Relay server) into local storage:
+    /// sorts ascending by ISO timestamp (supporting 9-digit Rust nanoseconds), folds adjacent identical fingerprints
+    /// keeping the earlier timestamp & richest detail, keeps newest-first capped at 50 entries per resonator,
+    /// and backfills missing detail caches for offline viewing / Calc Lab.
+    @discardableResult
+    func mergeHistories(
+        gameRoleId: String,
+        incoming: [WuwaResonatorHistoryEntry]
+    ) -> (byRoleId: [Int: [WuwaResonatorHistoryEntry]], added: Int) {
+        var existingByRole = loadAllHistories(gameRoleId: gameRoleId)
+        guard !incoming.isEmpty else {
+            return (existingByRole, 0)
+        }
+
+        let cleanRoleId = gameRoleId.trimmingCharacters(in: .whitespacesAndNewlines)
+        var incomingByRole: [Int: [WuwaResonatorHistoryEntry]] = [:]
+        for item in incoming where item.resonatorId > 0 && !item.fingerprint.isEmpty {
+            var copy = item
+            if copy.gameRoleId.isEmpty { copy.gameRoleId = cleanRoleId }
+            incomingByRole[item.resonatorId, default: []].append(copy)
+        }
+
+        var netAdded = 0
+        for (resonatorId, newEntries) in incomingByRole {
+            let prevList = existingByRole[resonatorId] ?? []
+            let combined = (prevList + newEntries).sorted { lhs, rhs in
+                Self.compareRecordedAtAsc(lhs.recordedAt, rhs.recordedAt)
+            }
+
+            var folded: [WuwaResonatorHistoryEntry] = []
+            for item in combined {
+                if var last = folded.last, last.fingerprint == item.fingerprint {
+                    if last.detail == nil, item.detail != nil { last.detail = item.detail }
+                    if last.attributes.isEmpty, !item.attributes.isEmpty { last.attributes = item.attributes }
+                    if last.echoes.isEmpty, !item.echoes.isEmpty { last.echoes = item.echoes }
+                    if last.weaponName.isEmpty, !item.weaponName.isEmpty { last.weaponName = item.weaponName }
+                    if last.weaponLevel == 0, item.weaponLevel > 0 { last.weaponLevel = item.weaponLevel }
+                    if last.weaponResonanceLevel == 0, item.weaponResonanceLevel > 0 {
+                        last.weaponResonanceLevel = item.weaponResonanceLevel
+                    }
+                    folded[folded.count - 1] = last
+                } else {
+                    folded.append(item)
+                }
+            }
+
+            let capped = Array(folded.suffix(50))
+            // Assign monotonic IDs 1...N ascending in chronological order, then reverse so newest is first.
+            var newestFirst: [WuwaResonatorHistoryEntry] = []
+            newestFirst.reserveCapacity(capped.count)
+            for (idx, var entry) in capped.enumerated() {
+                entry.id = idx + 1
+                newestFirst.append(entry)
+            }
+            newestFirst.reverse()
+
+            netAdded += max(0, newestFirst.count - prevList.count)
+            existingByRole[resonatorId] = newestFirst
+            writeJSON(newestFirst, to: historyURL(gameRoleId: gameRoleId, resonatorId: resonatorId))
+
+            let detailFile = detailURL(gameRoleId: gameRoleId, resonatorId: resonatorId)
+            if !fm.fileExists(atPath: detailFile.path),
+               let newestDetail = newestFirst.compactMap(\.detail).first {
+                writeJSON(newestDetail, to: detailFile)
+            }
+        }
+
+        return (existingByRole, netAdded)
+    }
+
+    nonisolated static func parseISO8601Timestamp(_ raw: String) -> TimeInterval? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "current" else { return nil }
+        let withT = trimmed.contains("T") ? trimmed : trimmed.replacingOccurrences(of: " ", with: "T")
+        // Collapse >3 fractional digits (e.g. Rust Chrono's 9-digit nanoseconds) to milliseconds.
+        let normalized = withT.replacingOccurrences(
+            of: #"(\.\d{3})\d+"#,
+            with: "$1",
+            options: .regularExpression
+        )
+        let fracFormatter = ISO8601DateFormatter()
+        fracFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = fracFormatter.date(from: normalized) {
+            return d.timeIntervalSince1970
+        }
+        let plainFormatter = ISO8601DateFormatter()
+        plainFormatter.formatOptions = [.withInternetDateTime]
+        if let d = plainFormatter.date(from: normalized) {
+            return d.timeIntervalSince1970
+        }
+        let spaceFmt = DateFormatter()
+        spaceFmt.locale = Locale(identifier: "en_US_POSIX")
+        spaceFmt.timeZone = TimeZone(secondsFromGMT: 8 * 3600)
+        spaceFmt.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        return spaceFmt.date(from: normalized)?.timeIntervalSince1970
+    }
+
+    nonisolated private static func compareRecordedAtAsc(_ lhs: String, _ rhs: String) -> Bool {
+        if let t1 = parseISO8601Timestamp(lhs), let t2 = parseISO8601Timestamp(rhs), t1 != t2 {
+            return t1 < t2
+        }
+        return lhs < rhs
+    }
+
     nonisolated static func computeFingerprint(for detail: WuwaResonatorDetail) -> String {
         let weaponPart: String
         if let w = detail.weapon {
@@ -194,23 +302,41 @@ actor WuwaStorage {
         return (sorted, added)
     }
 
-    func exportBackupData() throws -> Data {
+    func exportBackupData(gameRoleId: String? = nil) throws -> Data {
+        let histories = gameRoleId.map { loadAllHistoriesList(gameRoleId: $0) }
         let bundle = WuwaBackupBundle(
             schemaVersion: 1,
             exportedAt: ISO8601DateFormatter().string(from: Date()),
             pulls: loadPulls(),
             settings: [:],
-            catalogStates: []
+            catalogStates: [],
+            resonatorHistories: histories?.isEmpty == false ? histories : nil
         )
         return try encoder.encode(bundle)
     }
 
-    func importBackupData(_ data: Data) throws -> (all: [WuwaPullRecord], added: Int) {
+    func importBackupData(
+        _ data: Data,
+        gameRoleId: String? = nil
+    ) throws -> (all: [WuwaPullRecord], added: Int, historiesAdded: Int) {
         if let bundle = try? decoder.decode(WuwaBackupBundle.self, from: data) {
-            return mergePulls(bundle.pulls)
+            let pullResult = mergePulls(bundle.pulls)
+            var historiesAdded = 0
+            if let entries = bundle.resonatorHistories, !entries.isEmpty {
+                let grouped = Dictionary(grouping: entries) { entry -> String in
+                    let raw = entry.gameRoleId.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return raw.isEmpty ? (gameRoleId ?? "default") : raw
+                }
+                for (gid, items) in grouped {
+                    let res = mergeHistories(gameRoleId: gid, incoming: items)
+                    historiesAdded += res.added
+                }
+            }
+            return (pullResult.all, pullResult.added, historiesAdded)
         }
         if let rawPulls = try? decoder.decode([WuwaPullRecord].self, from: data) {
-            return mergePulls(rawPulls)
+            let pullResult = mergePulls(rawPulls)
+            return (pullResult.all, pullResult.added, 0)
         }
         throw WuwaAPIError.decodeError("备份文件不是有效的 WaveShelf 唤取 JSON 格式。")
     }

@@ -12,6 +12,7 @@ import { registerSettingsRoutes } from "./routes/settings.js";
 import { registerSwarmRoutes } from "./routes/swarms.js";
 import { registerTavernRoutes } from "./routes/tavern.js";
 import { registerUploadRoutes } from "./routes/uploads.js";
+import { registerWuwaRoutes } from "./routes/wuwa.js";
 import { SwarmManager } from "./swarm/manager.js";
 import { registerSwarmMcpRoutes } from "./swarm/mcp.js";
 import { TavernBridge } from "./tavern/bridge.js";
@@ -96,6 +97,7 @@ export async function createRelayServer(
   registerSwarmRoutes(app, swarmManager);
   registerSwarmMcpRoutes(app, swarmManager);
   registerTavernRoutes(app, config, tavernBridge);
+  registerWuwaRoutes(app, db);
 
   app.get("/ws", { websocket: true }, (socket) => {
     const unsubscribe = manager.subscribe((ev) => {

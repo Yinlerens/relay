@@ -7,7 +7,10 @@ final class WuwaStore {
     // MARK: - Navigation & Chrome
     var section: WuwaSection = .roles
     var hasBootstrapped = false
+    var isSyncingCloud = false
+    var lastCloudSyncText: String? = nil
     @ObservationIgnored var onBanner: ((String, Bool) -> Void)? = nil
+    @ObservationIgnored var relayAPIProvider: (@MainActor () -> RelayAPI?)? = nil
 
     // MARK: - Account & Community
     var session: WuwaSecureSession? = nil
@@ -88,6 +91,133 @@ final class WuwaStore {
             pickBestInitialPreset()
         }
         await recomputeCalcLab()
+        await syncFromRelayServer(showToast: false)
+    }
+
+    func resonatorIconURL(for roleId: Int) -> String {
+        if let fromSnap = snapshot.resonators.first(where: { $0.roleId == roleId })?.iconUrl, !fromSnap.isEmpty {
+            return fromSnap
+        }
+        if let fromDetail = detailsByRoleId[roleId]?.role.iconUrl, !fromDetail.isEmpty {
+            return fromDetail
+        }
+        return ""
+    }
+
+    func gachaItemIconURL(for record: WuwaPullRecord) -> String {
+        let isWeapon = record.resourceType.contains("武器")
+            || record.resourceId >= 21_000_000
+            || [2, 4, 9, 11, 13].contains(record.poolType)
+        if isWeapon {
+            for detail in detailsByRoleId.values {
+                if let w = detail.weapon,
+                   (w.weaponId == record.resourceId || (!record.name.isEmpty && w.name == record.name)),
+                   !w.iconUrl.isEmpty {
+                    return w.iconUrl
+                }
+            }
+            return ""
+        }
+        let byId = resonatorIconURL(for: record.resourceId)
+        if !byId.isEmpty { return byId }
+        if !record.name.isEmpty,
+           let match = snapshot.resonators.first(where: { $0.name == record.name })?.iconUrl,
+           !match.isEmpty {
+            return match
+        }
+        return ""
+    }
+
+    /// Pulls PC/remote WaveShelf gacha pulls & resonator echo histories from the authenticated Relay server,
+    /// merges them idempotently with local storage, and pushes any newer local-only records back up.
+    func syncFromRelayServer(showToast: Bool = false) async {
+        guard let api = relayAPIProvider?() else { return }
+        guard !isSyncingCloud else { return }
+        isSyncingCloud = true
+        defer { isSyncingCloud = false }
+
+        do {
+            let remote = try await api.fetchWuwaSync(gameRoleId: nil)
+
+            let prevPullsCount = pulls.count
+            let pullMerge = await WuwaStorage.shared.mergePulls(remote.pulls)
+            pulls = pullMerge.all
+            await recomputeGachaPools()
+            if prevPullsCount == 0 || pullMerge.added > 0 {
+                syncPlannerFromCurrentPools()
+            } else {
+                await recomputeGachaPlan()
+            }
+
+            let grouped = Dictionary(grouping: remote.histories) { entry -> String in
+                let gid = entry.gameRoleId.trimmingCharacters(in: .whitespacesAndNewlines)
+                return gid.isEmpty ? (activeGameRole?.roleId ?? "default") : gid
+            }
+            var totalHistAdded = 0
+            for (gid, items) in grouped {
+                let histMerge = await WuwaStorage.shared.mergeHistories(gameRoleId: gid, incoming: items)
+                totalHistAdded += histMerge.added
+            }
+
+            let targetRoleId = activeGameRole?.roleId ?? (grouped.count == 1 ? grouped.keys.first : nil)
+            if let gid = targetRoleId {
+                detailsByRoleId = await WuwaStorage.shared.loadAllDetails(gameRoleId: gid)
+                historyByRoleId = await WuwaStorage.shared.loadAllHistories(gameRoleId: gid)
+                await recomputeAllScoresAndTimelines()
+                pickBestInitialPresetIfUnset()
+                await recomputeCalcLab()
+            }
+
+            // Push any local-only pulls or histories back to Relay server so multi-device stays aligned
+            let remotePullIds = Set(remote.pulls.map(\.id))
+            let missingPulls = pulls.filter { !remotePullIds.contains($0.id) }
+            var missingHistories: [WuwaResonatorHistoryEntry] = []
+            if let gid = targetRoleId {
+                let remoteHistKeys = Set(
+                    remote.histories
+                        .filter { $0.gameRoleId == gid }
+                        .map { "\($0.resonatorId)|\($0.fingerprint)|\($0.recordedAt)" }
+                )
+                for entries in historyByRoleId.values {
+                    for entry in entries {
+                        let key = "\(entry.resonatorId)|\(entry.fingerprint)|\(entry.recordedAt)"
+                        if !remoteHistKeys.contains(key) {
+                            missingHistories.append(entry)
+                        }
+                    }
+                }
+            }
+            if !missingPulls.isEmpty || !missingHistories.isEmpty {
+                _ = try? await api.pushWuwaSync(
+                    pulls: missingPulls.isEmpty ? nil : missingPulls,
+                    histories: missingHistories.isEmpty ? nil : missingHistories
+                )
+            }
+
+            lastCloudSyncText = "抽卡 \(pulls.count) · 声骸 \(historyByRoleId.values.reduce(0) { $0 + $1.count })"
+            if showToast {
+                onBanner?(
+                    "已从 Relay 同步（抽卡 \(pulls.count) 条，声骸快照 \(remote.histories.count) 条）",
+                    false
+                )
+            }
+        } catch {
+            if showToast {
+                onBanner?("Relay 历史同步失败：\(error.localizedDescription)", true)
+            }
+        }
+    }
+
+    private func pushLocalHistoriesToRelay(gameRoleId: String) async {
+        guard let api = relayAPIProvider?() else { return }
+        let entries = await WuwaStorage.shared.loadAllHistoriesList(gameRoleId: gameRoleId)
+        guard !entries.isEmpty else { return }
+        _ = try? await api.pushWuwaSync(pulls: nil, histories: entries)
+    }
+
+    private func pushPullsToRelay(_ records: [WuwaPullRecord]) async {
+        guard let api = relayAPIProvider?(), !records.isEmpty else { return }
+        _ = try? await api.pushWuwaSync(pulls: records, histories: nil)
     }
 
     // MARK: - Auth
@@ -173,6 +303,7 @@ final class WuwaStore {
             snapshot = fetched.snapshot
             await WuwaStorage.shared.saveSnapshot(fetched.snapshot)
             await hydrateAllResonatorDetails()
+            await syncFromRelayServer(showToast: false)
             onBanner?("已绑定库街区账号", false)
             return true
         } catch {
@@ -222,6 +353,7 @@ final class WuwaStore {
                 await recomputeAllScoresAndTimelines()
                 await recomputeCalcLab()
             }
+            await syncFromRelayServer(showToast: false)
             onBanner?("已同步鸣潮角色面板", false)
         } catch {
             onBanner?(error.localizedDescription, true)
@@ -241,6 +373,7 @@ final class WuwaStore {
             await recomputeAllScoresAndTimelines()
             pickBestInitialPresetIfUnset()
             await recomputeCalcLab()
+            await pushLocalHistoriesToRelay(gameRoleId: role.roleId)
         } catch {
             if let gid = activeGameRole?.roleId {
                 detailsByRoleId = await WuwaStorage.shared.loadAllDetails(gameRoleId: gid)
@@ -273,6 +406,7 @@ final class WuwaStore {
             historyByRoleId[resonatorId] = hist
             await computeScoreAndTimeline(for: resonatorId)
             await recomputeCalcLab()
+            await pushLocalHistoriesToRelay(gameRoleId: role.roleId)
         } catch {
             if let cached = await WuwaStorage.shared.loadDetail(gameRoleId: role.roleId, resonatorId: resonatorId) {
                 detailsByRoleId[resonatorId] = cached
@@ -315,6 +449,7 @@ final class WuwaStore {
             pulls = merged.all
             await recomputeGachaPools()
             syncPlannerFromCurrentPools()
+            await pushPullsToRelay(res.records)
             onBanner?("已读取 \(res.records.count) 条记录，新增 \(merged.added) 条", false)
             return true
         } catch {
@@ -327,11 +462,18 @@ final class WuwaStore {
         isImportingGacha = true
         defer { isImportingGacha = false }
         do {
-            let merged = try await WuwaStorage.shared.importBackupData(data)
+            let gid = activeGameRole?.roleId
+            let merged = try await WuwaStorage.shared.importBackupData(data, gameRoleId: gid)
             pulls = merged.all
+            if let gid {
+                historyByRoleId = await WuwaStorage.shared.loadAllHistories(gameRoleId: gid)
+                await recomputeAllScoresAndTimelines()
+            }
             await recomputeGachaPools()
             syncPlannerFromCurrentPools()
-            onBanner?("已导入备份，新增 \(merged.added) 条唤取记录", false)
+            await pushPullsToRelay(merged.all)
+            if let gid { await pushLocalHistoriesToRelay(gameRoleId: gid) }
+            onBanner?("已导入备份，新增 \(merged.added) 条唤取、\(merged.historiesAdded) 条声骸记录", false)
             return true
         } catch {
             onBanner?(error.localizedDescription, true)
@@ -340,7 +482,7 @@ final class WuwaStore {
     }
 
     func exportBackupData() async throws -> Data {
-        try await WuwaStorage.shared.exportBackupData()
+        try await WuwaStorage.shared.exportBackupData(gameRoleId: activeGameRole?.roleId)
     }
 
     func recomputeGachaPools() async {

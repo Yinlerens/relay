@@ -17,6 +17,54 @@ import type {
   UsageStats,
 } from "./acp/types.js";
 
+export interface WuwaPullRecord {
+  id: string;
+  playerId: string;
+  poolType: number;
+  resourceId: number;
+  qualityLevel: number;
+  resourceType: string;
+  name: string;
+  count: number;
+  pulledAt: string;
+  languageCode: string;
+  occurrence: number;
+  importedAt: string;
+}
+
+export interface WuwaResonatorHistoryEntry {
+  id: number;
+  gameRoleId: string;
+  resonatorId: number;
+  fingerprint: string;
+  recordedAt: string;
+  level: number;
+  chainLevel: number;
+  weaponName: string;
+  weaponLevel: number;
+  weaponResonanceLevel: number;
+  attributes: unknown[];
+  echoes: unknown[];
+  detail: Record<string, unknown> | null;
+}
+
+function parseIsoTimestampMs(raw: string): number {
+  const trimmed = String(raw || "").trim();
+  if (!trimmed) return Number.NaN;
+  const withT = trimmed.includes("T") ? trimmed : trimmed.replace(" ", "T");
+  const normalized = withT.replace(/(\.\d{3})\d+/, "$1");
+  return Date.parse(normalized);
+}
+
+function compareRecordedAtAsc(a: string, b: string): number {
+  const msA = parseIsoTimestampMs(a);
+  const msB = parseIsoTimestampMs(b);
+  if (Number.isFinite(msA) && Number.isFinite(msB) && msA !== msB) {
+    return msA - msB;
+  }
+  return a.localeCompare(b);
+}
+
 export interface SessionSummary {
   id: string;
   agentId: string;
@@ -187,6 +235,42 @@ export class RelayDatabase {
       );
 
       CREATE INDEX IF NOT EXISTS idx_swarm_messages_swarm_seq ON swarm_messages(swarm_id, seq ASC);
+
+      CREATE TABLE IF NOT EXISTS wuwa_pulls (
+        id TEXT PRIMARY KEY,
+        player_id TEXT NOT NULL,
+        pool_type INTEGER NOT NULL,
+        resource_id INTEGER NOT NULL,
+        quality_level INTEGER NOT NULL,
+        resource_type TEXT NOT NULL,
+        name TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 1,
+        pulled_at TEXT NOT NULL,
+        language_code TEXT NOT NULL DEFAULT 'zh-Hans',
+        occurrence INTEGER NOT NULL DEFAULT 1,
+        imported_at TEXT NOT NULL DEFAULT ''
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_wuwa_pulls_time ON wuwa_pulls(pulled_at DESC, occurrence DESC);
+
+      CREATE TABLE IF NOT EXISTS wuwa_resonator_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_role_id TEXT NOT NULL,
+        resonator_id INTEGER NOT NULL,
+        fingerprint TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        level INTEGER NOT NULL,
+        chain_level INTEGER NOT NULL,
+        weapon_name TEXT NOT NULL DEFAULT '',
+        weapon_level INTEGER NOT NULL DEFAULT 0,
+        weapon_resonance_level INTEGER NOT NULL DEFAULT 0,
+        attributes_json TEXT NOT NULL DEFAULT '[]',
+        echoes_json TEXT NOT NULL DEFAULT '[]',
+        detail_json TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_wuwa_hist_role_res
+      ON wuwa_resonator_history(game_role_id, resonator_id, recorded_at DESC, id DESC);
     `);
 
     // Idempotent column migration on existing sessions table
@@ -1031,6 +1115,245 @@ export class RelayDatabase {
       .prepare("SELECT * FROM swarm_messages WHERE swarm_id = ? ORDER BY seq ASC")
       .all(swarmId) as Record<string, unknown>[];
     return rows.map((row) => this.mapSwarmMessage(row));
+  }
+
+  // MARK: - WaveShelf (鸣潮) History Sync
+
+  private mapWuwaPull(row: Record<string, unknown>): WuwaPullRecord {
+    return {
+      id: String(row.id),
+      playerId: String(row.player_id),
+      poolType: Number(row.pool_type),
+      resourceId: Number(row.resource_id),
+      qualityLevel: Number(row.quality_level),
+      resourceType: String(row.resource_type),
+      name: String(row.name),
+      count: Number(row.count || 1),
+      pulledAt: String(row.pulled_at),
+      languageCode: String(row.language_code || "zh-Hans"),
+      occurrence: Number(row.occurrence || 1),
+      importedAt: String(row.imported_at || ""),
+    };
+  }
+
+  private mapWuwaHistory(row: Record<string, unknown>): WuwaResonatorHistoryEntry {
+    const detail = row.detail_json
+      ? safeJson<Record<string, unknown> | null>(row.detail_json, null)
+      : null;
+    const rawResLevel = Number(row.weapon_resonance_level || 0);
+    const detailWeapon = detail?.weapon as Record<string, unknown> | undefined;
+    const weaponResonanceLevel =
+      rawResLevel > 0 ? rawResLevel : Number(detailWeapon?.resonanceLevel || 0);
+    return {
+      id: Number(row.id),
+      gameRoleId: String(row.game_role_id),
+      resonatorId: Number(row.resonator_id),
+      fingerprint: String(row.fingerprint),
+      recordedAt: String(row.recorded_at),
+      level: Number(row.level),
+      chainLevel: Number(row.chain_level),
+      weaponName: String(row.weapon_name || ""),
+      weaponLevel: Number(row.weapon_level || 0),
+      weaponResonanceLevel,
+      attributes: safeJson<unknown[]>(row.attributes_json, []),
+      echoes: safeJson<unknown[]>(row.echoes_json, []),
+      detail,
+    };
+  }
+
+  listWuwaPulls(): WuwaPullRecord[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM wuwa_pulls ORDER BY pulled_at DESC, occurrence DESC, id DESC"
+      )
+      .all() as Record<string, unknown>[];
+    return rows.map((row) => this.mapWuwaPull(row));
+  }
+
+  mergeWuwaPulls(records: WuwaPullRecord[]): { added: number; total: number } {
+    if (records.length === 0) {
+      const countRow = this.db.prepare("SELECT COUNT(*) AS cnt FROM wuwa_pulls").get() as {
+        cnt?: number;
+      };
+      return { added: 0, total: Number(countRow?.cnt || 0) };
+    }
+
+    const insertStmt = this.db.prepare(
+      `INSERT OR IGNORE INTO wuwa_pulls (
+        id, player_id, pool_type, resource_id, quality_level, resource_type,
+        name, count, pulled_at, language_code, occurrence, imported_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+
+    let added = 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const rec of records) {
+        if (!rec || !rec.id || !rec.playerId || !rec.pulledAt) continue;
+        const res = insertStmt.run(
+          String(rec.id),
+          String(rec.playerId),
+          Math.trunc(Number(rec.poolType)),
+          Math.trunc(Number(rec.resourceId)),
+          Math.trunc(Number(rec.qualityLevel)),
+          String(rec.resourceType || "未知"),
+          String(rec.name || ""),
+          Math.max(1, Math.trunc(Number(rec.count || 1))),
+          String(rec.pulledAt),
+          String(rec.languageCode || "zh-Hans"),
+          Math.max(1, Math.trunc(Number(rec.occurrence || 1))),
+          String(rec.importedAt || "")
+        );
+        added += Number(res.changes || 0);
+      }
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+
+    const countRow = this.db.prepare("SELECT COUNT(*) AS cnt FROM wuwa_pulls").get() as {
+      cnt?: number;
+    };
+    return { added, total: Number(countRow?.cnt || 0) };
+  }
+
+  listWuwaResonatorHistory(gameRoleId?: string): WuwaResonatorHistoryEntry[] {
+    const trimmed = gameRoleId?.trim();
+    const rows = trimmed
+      ? (this.db
+          .prepare(
+            "SELECT * FROM wuwa_resonator_history WHERE game_role_id = ? ORDER BY recorded_at DESC, id DESC"
+          )
+          .all(trimmed) as Record<string, unknown>[])
+      : (this.db
+          .prepare("SELECT * FROM wuwa_resonator_history ORDER BY recorded_at DESC, id DESC")
+          .all() as Record<string, unknown>[]);
+    return rows
+      .map((row) => this.mapWuwaHistory(row))
+      .sort((a, b) => compareRecordedAtAsc(b.recordedAt, a.recordedAt) || b.id - a.id);
+  }
+
+  mergeWuwaResonatorHistory(entries: WuwaResonatorHistoryEntry[]): {
+    added: number;
+    total: number;
+  } {
+    if (entries.length === 0) {
+      const countRow = this.db
+        .prepare("SELECT COUNT(*) AS cnt FROM wuwa_resonator_history")
+        .get() as { cnt?: number };
+      return { added: 0, total: Number(countRow?.cnt || 0) };
+    }
+
+    const groups = new Map<string, { gameRoleId: string; resonatorId: number; items: WuwaResonatorHistoryEntry[] }>();
+    for (const raw of entries) {
+      if (!raw || !raw.gameRoleId || !raw.resonatorId || !raw.fingerprint || !raw.recordedAt) continue;
+      const gameRoleId = String(raw.gameRoleId).trim();
+      const resonatorId = Math.trunc(Number(raw.resonatorId));
+      if (!gameRoleId || !Number.isFinite(resonatorId) || resonatorId <= 0) continue;
+      const key = `${gameRoleId}::${resonatorId}`;
+      const existingGroup = groups.get(key);
+      const detailWeapon = raw.detail?.weapon as Record<string, unknown> | undefined;
+      const normalized: WuwaResonatorHistoryEntry = {
+        id: Math.trunc(Number(raw.id || 0)),
+        gameRoleId,
+        resonatorId,
+        fingerprint: String(raw.fingerprint),
+        recordedAt: String(raw.recordedAt),
+        level: Math.trunc(Number(raw.level || 0)),
+        chainLevel: Math.trunc(Number(raw.chainLevel || 0)),
+        weaponName: String(raw.weaponName || ""),
+        weaponLevel: Math.trunc(Number(raw.weaponLevel || 0)),
+        weaponResonanceLevel:
+          Math.trunc(Number(raw.weaponResonanceLevel || 0)) ||
+          Math.trunc(Number(detailWeapon?.resonanceLevel || 0)),
+        attributes: Array.isArray(raw.attributes) ? raw.attributes : [],
+        echoes: Array.isArray(raw.echoes) ? raw.echoes : [],
+        detail: raw.detail && typeof raw.detail === "object" ? raw.detail : null,
+      };
+      if (existingGroup) {
+        existingGroup.items.push(normalized);
+      } else {
+        groups.set(key, { gameRoleId, resonatorId, items: [normalized] });
+      }
+    }
+
+    const selectGroupStmt = this.db.prepare(
+      "SELECT * FROM wuwa_resonator_history WHERE game_role_id = ? AND resonator_id = ?"
+    );
+    const deleteGroupStmt = this.db.prepare(
+      "DELETE FROM wuwa_resonator_history WHERE game_role_id = ? AND resonator_id = ?"
+    );
+    const insertRowStmt = this.db.prepare(
+      `INSERT INTO wuwa_resonator_history (
+        game_role_id, resonator_id, fingerprint, recorded_at,
+        level, chain_level, weapon_name, weapon_level, weapon_resonance_level,
+        attributes_json, echoes_json, detail_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+
+    let netAdded = 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const group of groups.values()) {
+        const existingRows = (
+          selectGroupStmt.all(group.gameRoleId, group.resonatorId) as Record<string, unknown>[]
+        ).map((row) => this.mapWuwaHistory(row));
+
+        const combined = [...existingRows, ...group.items].sort((a, b) =>
+          compareRecordedAtAsc(a.recordedAt, b.recordedAt)
+        );
+
+        const folded: WuwaResonatorHistoryEntry[] = [];
+        for (const item of combined) {
+          const prev = folded[folded.length - 1];
+          if (prev && prev.fingerprint === item.fingerprint) {
+            // Keep earlier recordedAt, prefer non-null detail & non-zero weaponResonanceLevel
+            folded[folded.length - 1] = {
+              ...prev,
+              detail: prev.detail ?? item.detail,
+              attributes: prev.attributes.length > 0 ? prev.attributes : item.attributes,
+              echoes: prev.echoes.length > 0 ? prev.echoes : item.echoes,
+              weaponName: prev.weaponName || item.weaponName,
+              weaponLevel: prev.weaponLevel || item.weaponLevel,
+              weaponResonanceLevel: prev.weaponResonanceLevel || item.weaponResonanceLevel,
+            };
+          } else {
+            folded.push(item);
+          }
+        }
+
+        const capped = folded.slice(-50);
+        netAdded += Math.max(0, capped.length - existingRows.length);
+
+        deleteGroupStmt.run(group.gameRoleId, group.resonatorId);
+        for (const item of capped) {
+          insertRowStmt.run(
+            item.gameRoleId,
+            item.resonatorId,
+            item.fingerprint,
+            item.recordedAt,
+            item.level,
+            item.chainLevel,
+            item.weaponName,
+            item.weaponLevel,
+            item.weaponResonanceLevel,
+            JSON.stringify(item.attributes),
+            JSON.stringify(item.echoes),
+            item.detail ? JSON.stringify(item.detail) : null
+          );
+        }
+      }
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+
+    const countRow = this.db
+      .prepare("SELECT COUNT(*) AS cnt FROM wuwa_resonator_history")
+      .get() as { cnt?: number };
+    return { added: netAdded, total: Number(countRow?.cnt || 0) };
   }
 
   close(): void {

@@ -545,34 +545,56 @@ struct WuwaResonatorDetailView: View {
     }
 
     private func timelineItemRow(item: WuwaComputedTimelineItem, index: Int, tint: Color) -> some View {
-        let entry = historyEntries.first(where: { $0.id == item.id }) ?? historyEntries[safe: index]
-        let prevEntry = historyEntries[safe: index + 1]
+        let matchedIdx = historyEntries.firstIndex(where: { $0.id == item.id }) ?? index
+        let entry = historyEntries[safe: matchedIdx]
+        let prevEntry = historyEntries[safe: matchedIdx + 1]
         let isExpanded = expandedHistoryId == item.id
+        let weaponLabel: String = {
+            guard !item.weaponName.isEmpty else { return "" }
+            let rankStr = item.weaponResonanceLevel > 0 ? " R\(item.weaponResonanceLevel)" : ""
+            return " · \(item.weaponName) Lv.\(item.weaponLevel)\(rankStr)"
+        }()
 
         return VStack(alignment: .leading, spacing: 7) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Circle()
                     .fill(index == 0 ? tint : Palette.textTertiary)
                     .frame(width: 7, height: 7)
-                Text(item.recordedAtLabel)
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .monospacedDigit()
-                Text("Lv.\(item.level) · \(item.chainLevel)链")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(Palette.textSecondary)
-                Spacer()
-                Text(item.grade.uppercased())
-                    .font(.system(size: 10.5, weight: .bold))
-                    .foregroundStyle(WuwaElementStyle.gradeColor(item.grade))
-                Text(String(format: "%.1f", item.score))
-                    .font(.system(size: 13.5, weight: .bold))
-                    .monospacedDigit()
-                if let delta = item.scoreDelta, abs(delta) >= 0.05 {
-                    let up = delta > 0
-                    Text("\(up ? "+" : "")\(String(format: "%.1f", delta))")
-                        .font(.system(size: 11, weight: .semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.recordedAtLabel)
+                        .font(.system(size: 12.5, weight: .semibold))
                         .monospacedDigit()
-                        .foregroundStyle(up ? Palette.success : Palette.danger)
+                    Text("Lv.\(item.level) · \(item.chainLevel)链\(weaponLabel)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Palette.textSecondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                if item.echoCount > 0 {
+                    Text(item.grade.uppercased())
+                        .font(.system(size: 10.5, weight: .bold))
+                        .foregroundStyle(WuwaElementStyle.gradeColor(item.grade))
+                    Text(String(format: "%.1f", item.score))
+                        .font(.system(size: 13.5, weight: .bold))
+                        .monospacedDigit()
+                } else {
+                    Text("未装声骸")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Palette.textTertiary)
+                }
+                if let delta = item.scoreDelta {
+                    if abs(delta) >= 0.05 {
+                        let up = delta > 0
+                        Text("\(up ? "+" : "")\(String(format: "%.1f", delta))")
+                            .font(.system(size: 11, weight: .semibold))
+                            .monospacedDigit()
+                            .foregroundStyle(up ? Palette.success : Palette.danger)
+                    } else {
+                        Text("±0.0")
+                            .font(.system(size: 11))
+                            .monospacedDigit()
+                            .foregroundStyle(Palette.textTertiary)
+                    }
                 } else if item.isBaseline {
                     Text(timeline.count == 1 ? "当前基线" : "初始基线")
                         .font(.system(size: 10.5))
@@ -602,9 +624,20 @@ struct WuwaResonatorDetailView: View {
                         .lineLimit(1)
                     }
                 }
+            } else if !item.isBaseline {
+                Text("面板词条无数值变化")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Palette.textTertiary)
             }
 
             if let entry, !entry.echoes.isEmpty {
+                let changedCount: Int = {
+                    guard let prevEchoes = prevEntry?.echoes else { return 0 }
+                    return entry.echoes.enumerated().reduce(0) { acc, pair in
+                        acc + ((prevEchoes[safe: pair.offset] != nil && prevEchoes[safe: pair.offset] != pair.element) ? 1 : 0)
+                    }
+                }()
+
                 Button {
                     withAnimation(.snappy(duration: 0.22)) {
                         expandedHistoryId = isExpanded ? nil : item.id
@@ -612,6 +645,10 @@ struct WuwaResonatorDetailView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Text(isExpanded ? "收起当期声骸" : "查看当期 \(entry.echoes.count) 件声骸")
+                        if changedCount > 0 {
+                            Text("(\(changedCount) 处更换)")
+                                .foregroundStyle(Palette.warning)
+                        }
                         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                     }
                     .font(.system(size: 11.5, weight: .medium))
@@ -625,15 +662,24 @@ struct WuwaResonatorDetailView: View {
                             let prevEcho = prevEntry?.echoes[safe: slotIdx]
                             let changed = prevEcho != nil && prevEcho != ec
                             HStack(alignment: .top, spacing: 8) {
-                                Text("C\(ec.cost)")
-                                    .font(.system(size: 10.5, weight: .bold))
-                                    .monospacedDigit()
-                                    .foregroundStyle(Palette.textSecondary)
-                                    .frame(width: 24, alignment: .leading)
+                                WuwaRemoteImage(
+                                    urlString: ec.iconUrl,
+                                    fallbackText: "C\(ec.cost)",
+                                    tint: changed ? Palette.warning : tint,
+                                    contentMode: .fit
+                                )
+                                .frame(width: 30, height: 30)
+                                .background(Palette.surface)
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
                                 VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 6) {
+                                    HStack(spacing: 5) {
                                         Text(ec.name)
                                             .font(.system(size: 12, weight: .semibold))
+                                        Text("C\(ec.cost) · +\(ec.level)")
+                                            .font(.system(size: 10.5))
+                                            .monospacedDigit()
+                                            .foregroundStyle(Palette.textTertiary)
                                         if let main = ec.mainProps.first {
                                             Text("\(main.name) \(main.value)")
                                                 .font(.system(size: 11))
@@ -647,6 +693,11 @@ struct WuwaResonatorDetailView: View {
                                                 .padding(.vertical, 1)
                                                 .background(Capsule().fill(Palette.warning.opacity(0.16)))
                                         }
+                                    }
+                                    if !ec.setName.isEmpty {
+                                        Text(ec.setName)
+                                            .font(.system(size: 10.5))
+                                            .foregroundStyle(Palette.textTertiary)
                                     }
                                     Text(ec.subProps.map { "\($0.name) \($0.value)" }.joined(separator: " · "))
                                         .font(.system(size: 11))

@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Minimalist 4-column resonator roster strictly preserving KuroBBS gallery order:
+/// Minimalist 4-column resonator roster in reverse KuroBBS gallery order (newest resonators first):
 /// avatar + top-right chain badge only, tapping pushes directly into `WuwaResonatorDetailView`.
 struct WuwaRolesView: View {
     @Environment(WuwaStore.self) private var wuwa
@@ -8,17 +8,21 @@ struct WuwaRolesView: View {
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 4)
 
+    private var displayedResonators: [WuwaResonator] {
+        Array(wuwa.snapshot.resonators.reversed())
+    }
+
     var body: some View {
         ScrollView {
             if !wuwa.snapshot.loggedIn {
                 loggedOutState
                     .padding(20)
-            } else if wuwa.snapshot.resonators.isEmpty {
+            } else if displayedResonators.isEmpty {
                 emptyState
                     .padding(20)
             } else {
                 LazyVGrid(columns: columns, spacing: 10) {
-                    ForEach(wuwa.snapshot.resonators) { resonator in
+                    ForEach(displayedResonators) { resonator in
                         NavigationLink(value: WuwaRoute.resonator(resonator.roleId)) {
                             ResonatorAvatarTile(resonator: resonator)
                         }
