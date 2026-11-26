@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import type { SessionManager } from "../acp/manager.js";
 import type { AppConfig } from "../config.js";
@@ -19,6 +20,8 @@ import type {
   TavernChatFile,
   TavernChatState,
   TavernCurrentOptions,
+  TavernErrorKind,
+  TavernGenerationError,
   TavernLoginUser,
   TavernMessage,
   TavernSelectInput,
@@ -34,6 +37,7 @@ interface PwCookie {
 interface PwResponse {
   url(): string;
   status(): number;
+  headers(): Record<string, string>;
   text(): Promise<string>;
 }
 
@@ -126,6 +130,144 @@ export function formatTavernHttpError(status: number, rawBody: string): string {
   return `生成请求失败 (${status})${detail ? `：${detail}` : ""}`;
 }
 
+export function classifyTavernError(
+  message: string,
+  statusCode?: number | null
+): TavernErrorKind {
+  if (
+    statusCode === 429 ||
+    /429|RESOURCE_EXHAUSTED|rate.?limit|quota|too many requests|限流/i.test(message)
+  ) {
+    return "rate_limit";
+  }
+  if (/PROHIBITED_CONTENT|SAFETY|blockReason|blocked|content.?policy|审核|拦截|拒绝/i.test(message)) {
+    return "safety";
+  }
+  if (
+    statusCode === 401 ||
+    statusCode === 403 ||
+    /401|403|unauthorized|forbidden|api.?key|鉴权/i.test(message)
+  ) {
+    return "auth";
+  }
+  if (
+    (statusCode !== undefined && statusCode !== null && statusCode >= 500) ||
+    /500|502|503|504|bad gateway|overloaded|unavailable|服务异常/i.test(message)
+  ) {
+    return "server";
+  }
+  if (/timeout|timed out|ECONNREFUSED|ENOTFOUND|network|fetch failed|连接/i.test(message)) {
+    return "network";
+  }
+  return "unknown";
+}
+
+export function extractTavernResponseError(
+  status: number,
+  contentType: string,
+  rawBody: string
+): { message: string; kind: TavernErrorKind; code: number | null } | null {
+  if (status >= 400) {
+    const message = formatTavernHttpError(status, rawBody);
+    return { message, kind: classifyTavernError(message, status), code: status };
+  }
+  if (status < 200 || status >= 300) {
+    return null;
+  }
+
+  const trimmed = String(rawBody || "").trim();
+  if (!trimmed) return null;
+  const ct = String(contentType || "").toLowerCase();
+
+  if (ct.includes("json") || trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      const errField = parsed?.error;
+      let detail = "";
+      if (errField && typeof errField === "object") {
+        const msg = (errField as Record<string, unknown>).message;
+        if (typeof msg === "string" && msg.trim()) detail = msg.trim();
+      } else if (typeof errField === "string" && errField.trim()) {
+        detail = errField.trim();
+      }
+      if (detail) {
+        detail = detail.replace(/\s+/g, " ").trim().slice(0, 180);
+        const kind = classifyTavernError(detail, null);
+        const message =
+          kind === "safety"
+            ? `内容被上游安全审核拦截：${detail}`
+            : `上游接口返回错误：${detail}`;
+        return { message, kind, code: null };
+      }
+    } catch {
+      // Ignore malformed JSON
+    }
+    return null;
+  }
+
+  if (ct.includes("event-stream") || trimmed.includes("data:")) {
+    const lines = trimmed.split(/\r?\n/);
+    let hasText = false;
+    let foundError: string | null = null;
+    let safetyReason: string | null = null;
+
+    for (const line of lines) {
+      const m = line.match(/^\s*data:\s*(.+)$/);
+      if (!m) continue;
+      const payloadStr = m[1].trim();
+      if (!payloadStr || payloadStr === "[DONE]") continue;
+      try {
+        const chunk = JSON.parse(payloadStr) as Record<string, unknown>;
+        if (chunk?.error && typeof chunk.error === "object") {
+          const msg = (chunk.error as Record<string, unknown>).message;
+          if (typeof msg === "string" && msg.trim()) foundError = msg.trim();
+        }
+        const pf = chunk?.promptFeedback as Record<string, unknown> | undefined;
+        if (pf && typeof pf.blockReason === "string" && pf.blockReason) {
+          safetyReason = pf.blockReason;
+        }
+        const cands = chunk?.candidates as Array<Record<string, unknown>> | undefined;
+        if (Array.isArray(cands)) {
+          for (const cand of cands) {
+            const content = cand?.content as Record<string, unknown> | undefined;
+            const parts = content?.parts as Array<Record<string, unknown>> | undefined;
+            if (Array.isArray(parts)) {
+              for (const p of parts) {
+                if (typeof p?.text === "string" && p.text.trim() && !p.thought) {
+                  hasText = true;
+                }
+              }
+            }
+            const fr = typeof cand?.finishReason === "string" ? cand.finishReason : "";
+            if (/^(PROHIBITED_CONTENT|SAFETY|BLOCKLIST|RECITATION|SPII)$/i.test(fr)) {
+              safetyReason = fr;
+            }
+          }
+        }
+      } catch {
+        // Ignore non-JSON SSE lines
+      }
+    }
+
+    if (foundError && !hasText) {
+      const clean = foundError.replace(/\s+/g, " ").trim().slice(0, 180);
+      const kind = classifyTavernError(clean, null);
+      const message =
+        kind === "safety" ? `内容被上游安全审核拦截：${clean}` : `上游接口返回错误：${clean}`;
+      return { message, kind, code: null };
+    }
+    if (safetyReason && !hasText) {
+      return {
+        message: `内容被上游安全审核拦截 (${safetyReason})`,
+        kind: "safety",
+        code: null,
+      };
+    }
+  }
+
+  return null;
+}
+
 export class TavernBridge implements TavernBridgeLike {
   private readonly authStore: TavernAuthStore;
   private context: PwBrowserContext | null = null;
@@ -166,6 +308,7 @@ export class TavernBridge implements TavernBridgeLike {
   private responseListenerPage: PwPage | null = null;
   private lastErrorEmitAt = 0;
   private lastErrorEmitKey = "";
+  private lastGenerationError: TavernGenerationError | null = null;
 
   constructor(
     private readonly config: AppConfig,
@@ -191,6 +334,7 @@ export class TavernBridge implements TavernBridgeLike {
       currentChatFile: this.currentChatFile,
       isGenerating: this.isGenerating,
       lastError: this.lastError,
+      lastGenerationError: this.lastGenerationError,
     };
   }
 
@@ -200,7 +344,17 @@ export class TavernBridge implements TavernBridgeLike {
     });
   }
 
-  private emitTavernError(message: string, statusCode?: number): void {
+  clearGenerationError(): { ok: true; status: TavernStatus } {
+    this.lastGenerationError = null;
+    this.emitStatus();
+    return { ok: true, status: this.buildStatus() };
+  }
+
+  private emitTavernError(
+    message: string,
+    statusCode?: number,
+    explicitKind?: TavernErrorKind
+  ): void {
     const clean = message.replace(/\s+/g, " ").trim().slice(0, 280);
     if (!clean || this.disposed) return;
 
@@ -214,20 +368,33 @@ export class TavernBridge implements TavernBridgeLike {
     this.lastErrorEmitAt = now;
     this.lastErrorEmitKey = clean;
 
+    const errObj: TavernGenerationError = {
+      id: crypto.randomUUID(),
+      characterId: this.currentCharacterId,
+      characterName: this.currentCharacterName,
+      chatFile: this.currentChatFile,
+      code: statusCode ?? null,
+      kind: explicitKind ?? classifyTavernError(clean, statusCode),
+      message: clean,
+      occurredAt: now,
+    };
+    this.lastGenerationError = errObj;
+
     if (this.isGenerating) {
       this.stopStreamPolling();
       this.isGenerating = false;
       this.sawLiveGenerating = false;
       this.generationStartedAt = 0;
-      this.emitStatus();
     }
+    this.emitStatus();
 
-    this.sessionManager.emitExternal("tavern_error", "tavern", {
-      characterId: this.currentCharacterId,
-      chatFile: this.currentChatFile,
-      code: statusCode ?? null,
-      message: clean,
-    });
+    this.sessionManager.emitExternal("tavern_error", "tavern", errObj);
+
+    const barkUrl = this.db.getSetting("bark_url");
+    if (barkUrl) {
+      const charLabel = this.currentCharacterName || "角色";
+      void sendBarkNotification(barkUrl, `酒馆 · ${charLabel}生成失败`, clean);
+    }
   }
 
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
@@ -312,8 +479,6 @@ export class TavernBridge implements TavernBridgeLike {
       this.page.on("response", (rawRes: unknown) => {
         const res = rawRes as PwResponse | undefined;
         if (!res || typeof res.status !== "function" || typeof res.url !== "function") return;
-        const status = res.status();
-        if (status < 400) return;
         const url = res.url();
         if (
           !/\/api\/backends\/[^/]+\/generate\b|\/api\/(?:google|openai|anthropic|claude|openrouter)\/|\/generate\b/i.test(
@@ -322,11 +487,20 @@ export class TavernBridge implements TavernBridgeLike {
         ) {
           return;
         }
+        const status = res.status();
+        const hdrs = typeof res.headers === "function" ? res.headers() : {};
+        const contentType = String(hdrs["content-type"] || hdrs["Content-Type"] || "").toLowerCase();
+        if (status < 400 && !contentType.includes("json") && !contentType.includes("event-stream")) {
+          return;
+        }
         void res
           .text()
           .catch(() => "")
           .then((body) => {
-            this.emitTavernError(formatTavernHttpError(status, body), status);
+            const extracted = extractTavernResponseError(status, contentType, body);
+            if (extracted) {
+              this.emitTavernError(extracted.message, extracted.code ?? undefined, extracted.kind);
+            }
           });
       });
     }
@@ -572,18 +746,19 @@ export class TavernBridge implements TavernBridgeLike {
       bind("MESSAGE_SWIPED", "message_swiped", "MESSAGE_SWIPED");
       bind("CHAT_CHANGED", "chat_changed", "CHAT_CHANGED");
 
-      const reportToastError = (node) => {
+      const reportToastNode = (node) => {
         if (!node || node.nodeType !== 1) return;
         const targets = [];
-        if (node.matches && node.matches(".toast-error")) targets.push(node);
+        if (node.matches && node.matches(".toast-error, .toast-warning")) targets.push(node);
         if (node.querySelectorAll) {
-          node.querySelectorAll(".toast-error").forEach((el) => targets.push(el));
+          node.querySelectorAll(".toast-error, .toast-warning").forEach((el) => targets.push(el));
         }
         for (const toast of targets) {
           const title = (toast.querySelector(".toast-title")?.textContent || "").trim();
           const body = (toast.querySelector(".toast-message")?.textContent || "").trim();
           const combined = [title, body].filter(Boolean).join("：") || (toast.textContent || "").trim();
-          if (combined) emit("TOAST_ERROR", { message: combined });
+          const level = toast.classList && toast.classList.contains("toast-warning") ? "warning" : "error";
+          if (combined) emit("TOAST_ERROR", { message: combined, level });
         }
       };
       if (typeof MutationObserver !== "undefined" && document.body) {
@@ -594,9 +769,10 @@ export class TavernBridge implements TavernBridgeLike {
                 const inToast =
                   (added.closest && added.closest("#toast-container")) ||
                   (added.id === "toast-container") ||
-                  (added.classList && added.classList.contains("toast-error")) ||
-                  (added.querySelector && added.querySelector(".toast-error"));
-                if (inToast) reportToastError(added);
+                  (added.classList &&
+                    (added.classList.contains("toast-error") || added.classList.contains("toast-warning"))) ||
+                  (added.querySelector && added.querySelector(".toast-error, .toast-warning"));
+                if (inToast) reportToastNode(added);
               }
             }
           }
@@ -994,6 +1170,7 @@ export class TavernBridge implements TavernBridgeLike {
     switch (eventName) {
       case "GENERATION_STARTED": {
         this.clearFinalizationTimers();
+        this.lastGenerationError = null;
         this.isGenerating = true;
         this.generationStartedAt = Date.now();
         this.sawLiveGenerating = Boolean(payloadLiveGen);
@@ -1004,6 +1181,7 @@ export class TavernBridge implements TavernBridgeLike {
       }
 
       case "STREAM_TOKEN_RECEIVED": {
+        this.lastGenerationError = null;
         if (!this.isGenerating) {
           this.isGenerating = true;
           this.generationStartedAt = Date.now();
@@ -1045,7 +1223,17 @@ export class TavernBridge implements TavernBridgeLike {
 
       case "TOAST_ERROR": {
         const msg = typeof payloadObj?.message === "string" ? payloadObj.message : "";
+        const level = typeof payloadObj?.level === "string" ? payloadObj.level : "error";
         if (msg) {
+          if (
+            level === "warning" &&
+            !this.isGenerating &&
+            !/prohibited|safety|block|quota|429|empty|candidate|error|fail|timeout|limit|refuse|拒绝|失败|异常|限流|审核|拦截/i.test(
+              msg
+            )
+          ) {
+            return;
+          }
           this.emitTavernError(msg);
         }
         break;
@@ -1205,6 +1393,9 @@ export class TavernBridge implements TavernBridgeLike {
       const state = await this.extractChatState();
       const lastMsg = state.messages[state.messages.length - 1] ?? null;
       if (lastMsg) {
+        if (!lastMsg.isUser) {
+          this.lastGenerationError = null;
+        }
         lastMsg.isStreaming = false;
         this.sessionManager.emitExternal("tavern_message_finalized", "tavern", {
           characterId: state.status.currentCharacterId,
@@ -1660,6 +1851,7 @@ export class TavernBridge implements TavernBridgeLike {
       }, clean);
 
       this.clearFinalizationTimers();
+      this.lastGenerationError = null;
       this.isGenerating = true;
       this.generationStartedAt = Date.now();
       this.sawLiveGenerating = false;
@@ -1725,6 +1917,7 @@ export class TavernBridge implements TavernBridgeLike {
         if (btn) btn.click();
       })()`);
       this.clearFinalizationTimers();
+      this.lastGenerationError = null;
       this.isGenerating = true;
       this.generationStartedAt = Date.now();
       this.sawLiveGenerating = false;
@@ -1753,6 +1946,7 @@ export class TavernBridge implements TavernBridgeLike {
         if (btn) btn.click();
       })()`);
       this.clearFinalizationTimers();
+      this.lastGenerationError = null;
       this.isGenerating = true;
       this.generationStartedAt = Date.now();
       this.sawLiveGenerating = false;

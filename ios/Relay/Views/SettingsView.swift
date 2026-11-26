@@ -1,10 +1,15 @@
 import SwiftUI
+import UIKit
+import UserNotifications
 
 struct SettingsView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
     @AppStorage(SettingsKey.appearance) private var appearance: AppearanceMode = .system
     @AppStorage(SettingsKey.haptics) private var hapticsEnabled = true
+    @AppStorage(SettingsKey.errorNotifications) private var errorNotificationsEnabled = true
+    @State private var notificationAuthStatus: UNAuthorizationStatus = .notDetermined
     @State private var barkDraft = ""
     @State private var savingBark = false
     @State private var confirmSignOut = false
@@ -91,6 +96,61 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("外观与触感")
+                }
+
+                Section {
+                    Toggle(isOn: $errorNotificationsEnabled) {
+                        Label("本机系统报错通知", systemImage: "bell.badge.fill")
+                    }
+                    .onChange(of: errorNotificationsEnabled) { _, enabled in
+                        Haptics.selection()
+                        if enabled {
+                            Task {
+                                _ = await NotificationManager.shared.requestAuthorization()
+                                notificationAuthStatus = await NotificationManager.shared.authorizationStatus()
+                            }
+                        }
+                    }
+
+                    if notificationAuthStatus == .denied {
+                        HStack(spacing: 10) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(Palette.warning)
+                            Text("系统通知权限已关闭，切到后台后将无法弹窗")
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(Palette.textSecondary)
+                            Spacer()
+                            Button("去设置") {
+                                if let url = URL(string: UIApplication.openSettingsURLString) {
+                                    openURL(url)
+                                }
+                            }
+                            .font(.system(size: 12.5, weight: .semibold))
+                        }
+                    }
+
+                    Button {
+                        Haptics.tap()
+                        Task {
+                            if notificationAuthStatus == .notDetermined {
+                                _ = await NotificationManager.shared.requestAuthorization()
+                                notificationAuthStatus = await NotificationManager.shared.authorizationStatus()
+                            }
+                            store.showBanner("测试报错提醒：上游接口限流 (429)", isError: true)
+                            NotificationManager.shared.notifyError(
+                                title: "Relay 测试报错提醒",
+                                body: "上游接口限流 (429)：当后台生成失败或被审核拦截时，会推送此系统提醒。",
+                                identifier: "relay-test-error-\(Int(Date().timeIntervalSince1970))",
+                                forceInForeground: true
+                            )
+                        }
+                    } label: {
+                        Label("发送测试报错提醒", systemImage: "exclamationmark.bubble")
+                    }
+                } header: {
+                    Text("报错提醒")
+                } footer: {
+                    Text("酒馆或 Agent 遇到 429 限流、安全审核拦截等错误时，前台展示横幅与聊天报错卡；退到后台短时间内由本机推送提醒（长期锁屏可配合下方 Bark）。")
                 }
 
                 Section {
@@ -201,6 +261,7 @@ struct SettingsView: View {
             }
             .task {
                 cacheStats = await RelayDiskCache.shared.computeStats()
+                notificationAuthStatus = await NotificationManager.shared.authorizationStatus()
             }
             .sheet(isPresented: $showQuota) {
                 QuotaSheet()

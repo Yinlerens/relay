@@ -169,7 +169,8 @@ struct TavernChatView: View {
                     if isGenerating && (messages.last?.isUser == true || messages.last?.isStreaming != true) {
                         pendingAssistantRow
                             .transition(.opacity)
-                    } else if let genErr = store.tavernGenerationError, !genErr.isEmpty {
+                    } else if let genErr = store.tavernGenerationError,
+                              (genErr.characterId == nil || genErr.characterId == characterId) {
                         generationErrorCard(genErr)
                             .transition(.opacity.combined(with: .move(edge: .bottom)))
                     } else if !isGenerating && messages.last?.isUser == true {
@@ -389,7 +390,7 @@ struct TavernChatView: View {
         let perform = {
             if let lastMesId = messages.last?.mesId,
                !isGenerating,
-               (store.tavernGenerationError ?? "").isEmpty,
+               store.tavernGenerationError == nil,
                messages.last?.isUser != true {
                 proxy.scrollTo(lastMesId, anchor: .bottom)
             }
@@ -430,17 +431,44 @@ struct TavernChatView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func generationErrorCard(_ errorText: String) -> some View {
-        HStack(alignment: .top, spacing: 11) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Palette.danger)
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 10) {
-                Text(errorText)
-                    .font(.system(size: 13.5, weight: .medium))
-                    .foregroundStyle(Palette.textPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
+    private func generationErrorCard(_ err: TavernGenerationError) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Palette.danger)
+                Text(err.badgeTitle)
+                    .font(.system(size: 11.5, weight: .bold))
+                    .foregroundStyle(Palette.danger)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Palette.danger.opacity(0.13)))
+                if let date = err.occurredDate {
+                    Text(RelayFormat.relative(date))
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Palette.textTertiary)
+                }
+                Spacer(minLength: 4)
+                Button {
+                    Task { await store.clearTavernGenerationError() }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Palette.textTertiary)
+                        .padding(6)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("关闭错误提示")
+            }
+
+            Text(err.message)
+                .font(.system(size: 13.5, weight: .medium))
+                .foregroundStyle(Palette.textPrimary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
                 Button {
                     Haptics.tap(.medium)
                     Task { await store.regenerateTavern() }
@@ -457,24 +485,33 @@ struct TavernChatView: View {
                     .background(Capsule().fill(TavernTheme.gradient))
                 }
                 .buttonStyle(.pressable)
-            }
-            Spacer(minLength: 4)
-            Button {
-                withAnimation(.easeOut(duration: 0.2)) {
-                    store.tavernGenerationError = nil
+
+                Button {
+                    UIPasteboard.general.string = err.message
+                    Haptics.success()
+                    store.showBanner("已复制报错内容", isError: false)
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 11, weight: .medium))
+                        Text("复制报错")
+                    }
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(Palette.textSecondary)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(Palette.fieldFill))
+                    .overlay(Capsule().stroke(Palette.hairline, lineWidth: 0.6))
                 }
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Palette.textTertiary)
-                    .padding(6)
-                    .contentShape(Rectangle())
+                .buttonStyle(.pressable)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("关闭错误提示")
         }
         .padding(14)
         .cardSurface(radius: 16)
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Palette.danger.opacity(0.35), lineWidth: 0.8)
+        )
     }
 
     private var orphanRetryRow: some View {

@@ -1,3 +1,22 @@
+export type TavernErrorKind =
+  | "rate_limit"
+  | "safety"
+  | "auth"
+  | "server"
+  | "network"
+  | "unknown";
+
+export interface TavernGenerationError {
+  id: string;
+  characterId: number | null;
+  characterName: string | null;
+  chatFile: string | null;
+  code: number | null;
+  kind: TavernErrorKind;
+  message: string;
+  occurredAt: number;
+}
+
 export interface TavernStatus {
   enabled: boolean;
   ready: boolean;
@@ -9,6 +28,7 @@ export interface TavernStatus {
   currentChatFile: string | null;
   isGenerating: boolean;
   lastError: string | null;
+  lastGenerationError?: TavernGenerationError | null;
 }
 
 export interface TavernLoginUser {
@@ -115,6 +135,7 @@ export interface TavernBridgeLike {
   ): Promise<{ message: TavernMessage | null; state: TavernChatState }>;
   deleteMessage(mesId: number): Promise<{ ok: true; state: TavernChatState }>;
   runSlash(command: string): Promise<{ ok: true; result?: string; state: TavernChatState }>;
+  clearGenerationError(): { ok: true; status: TavernStatus };
   getAssetCookieHeader(): Promise<string>;
   dispose(): Promise<void>;
 }

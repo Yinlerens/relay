@@ -7,7 +7,10 @@ struct RelayApp: App {
     @AppStorage(SettingsKey.appearance) private var appearance: AppearanceMode = .system
 
     init() {
-        UserDefaults.standard.register(defaults: [SettingsKey.haptics: true])
+        UserDefaults.standard.register(defaults: [
+            SettingsKey.haptics: true,
+            SettingsKey.errorNotifications: true,
+        ])
         // Editorial serif large titles (New York) for a calm, premium navigation feel.
         let large = UIFont.systemFont(ofSize: 34, weight: .bold)
         if let serif = large.fontDescriptor.withDesign(.serif) {
@@ -21,6 +24,7 @@ struct RelayApp: App {
                 .environment(store)
                 .onAppear {
                     appearance.applyToWindows()
+                    NotificationManager.shared.configure()
                 }
                 .onChange(of: appearance) { _, mode in
                     mode.applyToWindows()
@@ -54,6 +58,11 @@ struct RootView: View {
                     .padding(.horizontal, 20)
                     .transition(.move(edge: .top).combined(with: .opacity))
                     .onTapGesture {
+                        if let cid = banner.tavernCharacterId {
+                            store.pendingOpenTavernCharacterId = cid
+                        } else if let sid = banner.sessionId {
+                            store.requestOpenSession(sid)
+                        }
                         withAnimation(.easeOut(duration: 0.2)) { store.banner = nil }
                     }
             }
@@ -103,6 +112,11 @@ struct BannerView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .glassCapsule()
+        .overlay(
+            Capsule()
+                .stroke(banner.isError ? Palette.danger.opacity(0.45) : Color.clear, lineWidth: 0.9)
+        )
+        .shadow(color: banner.isError ? Palette.danger.opacity(0.18) : .clear, radius: 12, y: 4)
         .accessibilityElement(children: .combine)
     }
 }

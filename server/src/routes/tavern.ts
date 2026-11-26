@@ -181,6 +181,10 @@ export function registerTavernRoutes(
     return reply.code(202).send(res);
   });
 
+  app.post("/api/tavern/clear-error", async () => {
+    return bridge.clearGenerationError();
+  });
+
   app.post<{
     Body: { mesId?: number; direction?: TavernSwipeDirection };
   }>("/api/tavern/swipe", async (req, reply) => {

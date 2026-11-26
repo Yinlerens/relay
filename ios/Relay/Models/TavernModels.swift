@@ -80,6 +80,70 @@ enum TavernSwipeDirection: String, Sendable {
 
 // MARK: - Core Tavern DTOs
 
+struct TavernGenerationError: Codable, Hashable, Identifiable, Sendable {
+    var id: String
+    var characterId: Int?
+    var characterName: String?
+    var chatFile: String?
+    var code: Int?
+    var kind: String
+    var message: String
+    var occurredAt: Double
+
+    enum CodingKeys: String, CodingKey {
+        case id, characterId, characterName, chatFile, code, kind, message, occurredAt
+    }
+
+    init(
+        id: String = UUID().uuidString,
+        characterId: Int? = nil,
+        characterName: String? = nil,
+        chatFile: String? = nil,
+        code: Int? = nil,
+        kind: String = "unknown",
+        message: String,
+        occurredAt: Double = Date().timeIntervalSince1970 * 1000
+    ) {
+        self.id = id
+        self.characterId = characterId
+        self.characterName = characterName
+        self.chatFile = chatFile
+        self.code = code
+        self.kind = kind
+        self.message = message
+        self.occurredAt = occurredAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = c.flexString(.id, default: UUID().uuidString)
+        characterId = c.flexOptionalInt(.characterId)
+        characterName = c.flexOptionalString(.characterName)
+        chatFile = c.flexOptionalString(.chatFile)
+        code = c.flexOptionalInt(.code)
+        kind = c.flexString(.kind, default: "unknown")
+        message = c.flexString(.message)
+        occurredAt = c.flexDouble(.occurredAt)
+    }
+
+    var occurredDate: Date? {
+        guard occurredAt > 0 else { return nil }
+        let seconds = occurredAt > 10_000_000_000 ? occurredAt / 1000 : occurredAt
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    var badgeTitle: String {
+        switch kind {
+        case "rate_limit": return code == 429 ? "429 限流" : "请求限流"
+        case "safety": return "安全拦截"
+        case "auth": return "鉴权失败"
+        case "server": return code != nil ? "服务异常 \(code!)" : "服务异常"
+        case "network": return "网络异常"
+        default: return code != nil ? "报错 \(code!)" : "生成失败"
+        }
+    }
+}
+
 struct TavernStatus: Codable, Hashable, Sendable {
     var enabled: Bool
     var ready: Bool
@@ -91,11 +155,12 @@ struct TavernStatus: Codable, Hashable, Sendable {
     var currentChatFile: String?
     var isGenerating: Bool
     var lastError: String?
+    var lastGenerationError: TavernGenerationError?
 
     enum CodingKeys: String, CodingKey {
         case enabled, ready, needsLogin, handle, publicUrl
         case currentCharacterId, currentCharacterName, currentChatFile
-        case isGenerating, lastError
+        case isGenerating, lastError, lastGenerationError
     }
 
     init(
@@ -108,7 +173,8 @@ struct TavernStatus: Codable, Hashable, Sendable {
         currentCharacterName: String? = nil,
         currentChatFile: String? = nil,
         isGenerating: Bool = false,
-        lastError: String? = nil
+        lastError: String? = nil,
+        lastGenerationError: TavernGenerationError? = nil
     ) {
         self.enabled = enabled
         self.ready = ready
@@ -120,6 +186,7 @@ struct TavernStatus: Codable, Hashable, Sendable {
         self.currentChatFile = currentChatFile
         self.isGenerating = isGenerating
         self.lastError = lastError
+        self.lastGenerationError = lastGenerationError
     }
 
     init(from decoder: Decoder) throws {
@@ -134,6 +201,7 @@ struct TavernStatus: Codable, Hashable, Sendable {
         currentChatFile = c.flexOptionalString(.currentChatFile)
         isGenerating = c.flexBool(.isGenerating)
         lastError = c.flexOptionalString(.lastError)
+        lastGenerationError = try? c.decodeIfPresent(TavernGenerationError.self, forKey: .lastGenerationError)
     }
 
     var publicURL: URL? {
@@ -540,18 +608,41 @@ struct WSTavernChatUpdatedPayload: Decodable, Sendable {
 }
 
 struct WSTavernErrorPayload: Decodable, Sendable {
+    var id: String?
     var characterId: Int?
+    var characterName: String?
     var chatFile: String?
     var code: Int?
+    var kind: String?
     var message: String
+    var occurredAt: Double?
 
-    enum CodingKeys: String, CodingKey { case characterId, chatFile, code, message }
+    enum CodingKeys: String, CodingKey {
+        case id, characterId, characterName, chatFile, code, kind, message, occurredAt
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = c.flexOptionalString(.id)
         characterId = c.flexOptionalInt(.characterId)
+        characterName = c.flexOptionalString(.characterName)
         chatFile = c.flexOptionalString(.chatFile)
         code = c.flexOptionalInt(.code)
+        kind = c.flexOptionalString(.kind)
         message = c.flexString(.message)
+        occurredAt = c.flexOptionalDouble(.occurredAt)
+    }
+
+    func toGenerationError() -> TavernGenerationError {
+        TavernGenerationError(
+            id: (id?.isEmpty == false) ? id! : UUID().uuidString,
+            characterId: characterId,
+            characterName: characterName,
+            chatFile: chatFile,
+            code: code,
+            kind: kind ?? "unknown",
+            message: message,
+            occurredAt: occurredAt ?? (Date().timeIntervalSince1970 * 1000)
+        )
     }
 }

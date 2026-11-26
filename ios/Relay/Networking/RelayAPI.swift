@@ -412,6 +412,14 @@ struct RelayAPI: Sendable {
         return try await send(request, as: OkResponse.self)
     }
 
+    func tavernClearError() async throws -> TavernStatusResponse {
+        var request = authorizedRequest("/api/tavern/clear-error", method: "POST")
+        request.timeoutInterval = 30
+        request.httpBody = Data("{}".utf8)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await send(request, as: TavernStatusResponse.self)
+    }
+
     func tavernSwipe(mesId: Int, direction: TavernSwipeDirection) async throws -> TavernMessageMutationResponse {
         var request = authorizedRequest("/api/tavern/swipe", method: "POST")
         request.timeoutInterval = 60

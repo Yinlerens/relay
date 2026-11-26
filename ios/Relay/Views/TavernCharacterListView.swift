@@ -118,6 +118,9 @@ struct TavernCharacterListView<Header: View>: View {
                 ForEach(filteredCharacters) { character in
                     let isCurrent = store.tavernStatus?.currentCharacterId == character.id
                     let isGenerating = isCurrent && store.isTavernGenerating
+                    let rowError = (store.tavernGenerationError?.characterId == character.id && !isGenerating)
+                        ? store.tavernGenerationError
+                        : nil
                     Button {
                         Haptics.tap(.soft)
                         onSelectCharacter(character.id)
@@ -125,7 +128,8 @@ struct TavernCharacterListView<Header: View>: View {
                         TavernCharacterRow(
                             character: character,
                             isCurrent: isCurrent,
-                            isGenerating: isGenerating
+                            isGenerating: isGenerating,
+                            generationError: rowError
                         )
                     }
                     .buttonStyle(.pressable)
@@ -436,6 +440,7 @@ struct TavernCharacterRow: View {
     let character: TavernCharacter
     let isCurrent: Bool
     let isGenerating: Bool
+    var generationError: TavernGenerationError? = nil
 
     private var subtitleText: String {
         if let chat = character.chat, !chat.isEmpty {
@@ -476,7 +481,14 @@ struct TavernCharacterRow: View {
                         .font(.system(size: 16.5, weight: .semibold))
                         .foregroundStyle(Palette.textPrimary)
                         .lineLimit(1)
-                    if isCurrent {
+                    if let generationError {
+                        Text(generationError.badgeTitle)
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundStyle(Palette.danger)
+                            .padding(.horizontal, 6.5)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Palette.danger.opacity(0.13)))
+                    } else if isCurrent {
                         Text(isGenerating ? "生成中" : "当前")
                             .font(.system(size: 10.5, weight: .bold))
                             .foregroundStyle(TavernTheme.tint)
@@ -493,11 +505,19 @@ struct TavernCharacterRow: View {
                     }
                 }
 
-                Text(subtitleText)
-                    .font(.system(size: 13.5))
-                    .foregroundStyle(Palette.textSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                if let generationError {
+                    Text(generationError.message)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(Palette.danger)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                } else {
+                    Text(subtitleText)
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(Palette.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
 
                 if !character.tags.isEmpty {
                     HStack(spacing: 5) {

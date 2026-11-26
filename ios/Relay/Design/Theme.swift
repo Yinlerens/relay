@@ -133,6 +133,7 @@ enum AppearanceMode: String, CaseIterable, Identifiable, Sendable {
 enum SettingsKey {
     static let appearance = "appearance"
     static let haptics = "hapticsEnabled"
+    static let errorNotifications = "errorNotificationsEnabled"
 }
 
 // MARK: - Agent signature styling

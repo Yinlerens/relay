@@ -7,7 +7,11 @@ import { afterEach, describe, it } from "node:test";
 import { createRelayServer, type RelayServerInstance } from "../src/app.js";
 import type { AppConfig } from "../src/config.js";
 import { TavernAuthStore } from "../src/tavern/auth-store.js";
-import { formatTavernHttpError } from "../src/tavern/bridge.js";
+import {
+  classifyTavernError,
+  extractTavernResponseError,
+  formatTavernHttpError,
+} from "../src/tavern/bridge.js";
 import {
   applyIncrementalChatDiff,
   buildExtractChatMessagesScript,
@@ -215,6 +219,11 @@ function createMockTavernBridge(): TavernBridgeLike & {
     async runSlash(command: string) {
       calls.push(`slash:${command}`);
       return { ok: true, result: `executed:${command}`, state };
+    },
+    clearGenerationError() {
+      calls.push("clearGenerationError");
+      state.status.lastGenerationError = null;
+      return { ok: true as const, status: state.status };
     },
     async getAssetCookieHeader() {
       return "session-cookie=st_demo_cookie_value";
@@ -606,6 +615,11 @@ describe("Tavern Bridge Utilities & Routes", () => {
     const contRes = await api("/api/tavern/continue", { method: "POST" });
     assert.equal(contRes.status, 202);
     assert.equal(contRes.json.ok, true);
+
+    const clearErrRes = await api("/api/tavern/clear-error", { method: "POST" });
+    assert.equal(clearErrRes.status, 200);
+    assert.equal(clearErrRes.json.ok, true);
+    assert.equal(clearErrRes.json.status.lastGenerationError, null);
 
     const swipeRes = await api("/api/tavern/swipe", {
       method: "POST",
@@ -1088,5 +1102,53 @@ describe("Tavern Bridge Utilities & Routes", () => {
       formatTavernHttpError(403, JSON.stringify({ error: "Forbidden" })),
       "上游接口鉴权或权限拒绝 (403)：Forbidden"
     );
+  });
+
+  it("extracts and classifies errors from HTTP 200 JSON/SSE safety blocks and HTTP error responses", () => {
+    assert.equal(classifyTavernError("Resource exhausted", 429), "rate_limit");
+    assert.equal(classifyTavernError("PROHIBITED_CONTENT"), "safety");
+    assert.equal(classifyTavernError("Unauthorized", 401), "auth");
+    assert.equal(classifyTavernError("Bad Gateway", 502), "server");
+    assert.equal(classifyTavernError("fetch failed ECONNREFUSED"), "network");
+
+    const r429 = extractTavernResponseError(
+      429,
+      "application/json",
+      JSON.stringify({ error: { code: 429, message: "Resource exhausted." } })
+    );
+    assert.equal(r429?.kind, "rate_limit");
+    assert.equal(r429?.code, 429);
+    assert.ok(r429?.message.includes("429"));
+
+    const r200SafetyJson = extractTavernResponseError(
+      200,
+      "application/json",
+      JSON.stringify({
+        error: {
+          message: "Vertex AI API returned no candidate\nPrompt was blocked due to : PROHIBITED_CONTENT",
+        },
+      })
+    );
+    assert.equal(r200SafetyJson?.kind, "safety");
+    assert.equal(r200SafetyJson?.code, null);
+    assert.ok(r200SafetyJson?.message.includes("安全审核拦截"));
+
+    const sseBlocked = [
+      'data: {"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"}}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    const rSseSafety = extractTavernResponseError(200, "text/event-stream", sseBlocked);
+    assert.equal(rSseSafety?.kind, "safety");
+    assert.ok(rSseSafety?.message.includes("PROHIBITED_CONTENT"));
+
+    const sseNormal = [
+      'data: {"candidates":[{"content":{"parts":[{"text":"Normal story text mentioning blockReason"}]}}]}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n");
+    assert.equal(extractTavernResponseError(200, "text/event-stream", sseNormal), null);
   });
 });

@@ -6,6 +6,8 @@ struct Banner: Identifiable, Equatable, Sendable {
     let id = UUID()
     var message: String
     var isError: Bool = true
+    var sessionId: String? = nil
+    var tavernCharacterId: Int? = nil
 }
 
 struct PairingRequest: Identifiable, Equatable, Sendable {
@@ -80,8 +82,9 @@ final class AppStore {
     var isReloadingTavern = false
     var isMutatingTavern = false
     var tavernError: String? = nil
-    var tavernGenerationError: String? = nil
+    var tavernGenerationError: TavernGenerationError? = nil
     var activeTavernCharacterId: Int? = nil
+    var pendingOpenTavernCharacterId: Int? = nil
 
     // MARK: Private
     private let socket: RelaySocket
@@ -91,6 +94,8 @@ final class AppStore {
     @ObservationIgnored private var tavernConversationMemory: [String: CachedTavernConversation] = [:]
     @ObservationIgnored private var latestChatByChar: [Int: String] = [:]
     @ObservationIgnored private var latestChatHydrated = false
+    @ObservationIgnored private var lastNotifiedTavernErrorId: String? = nil
+    @ObservationIgnored private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
     private struct PendingDelta {
         var sessionId: String
@@ -270,10 +275,34 @@ final class AppStore {
 
     func scenePhaseChanged(_ phase: ScenePhase) {
         guard isPaired else { return }
-        if phase == .active {
+        switch phase {
+        case .active:
+            endBackgroundTaskIfNeeded()
             socket.ensureConnected()
             Task { await resync() }
+        case .background:
+            if isTavernGenerating || sessions.contains(where: \.isRunning) {
+                beginBackgroundGraceTask()
+            }
+        default:
+            break
         }
+    }
+
+    private func beginBackgroundGraceTask() {
+        guard backgroundTaskID == .invalid else { return }
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "RelayErrorWatch") { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.endBackgroundTaskIfNeeded()
+            }
+        }
+    }
+
+    private func endBackgroundTaskIfNeeded() {
+        guard backgroundTaskID != .invalid else { return }
+        let taskId = backgroundTaskID
+        backgroundTaskID = .invalid
+        UIApplication.shared.endBackgroundTask(taskId)
     }
 
     private func apply(_ boot: BootstrapResponse) {
@@ -398,13 +427,24 @@ final class AppStore {
 
     // MARK: - Banner
 
-    func showBanner(_ message: String, isError: Bool = true) {
+    func showBanner(
+        _ message: String,
+        isError: Bool = true,
+        sessionId: String? = nil,
+        tavernCharacterId: Int? = nil
+    ) {
         bannerTask?.cancel()
         withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) {
-            banner = Banner(message: message, isError: isError)
+            banner = Banner(
+                message: message,
+                isError: isError,
+                sessionId: sessionId,
+                tavernCharacterId: tavernCharacterId
+            )
         }
+        let durationMs = isError ? 6000 : 3200
         bannerTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(3200))
+            try? await Task.sleep(for: .milliseconds(durationMs))
             guard !Task.isCancelled else { return }
             withAnimation(.easeInOut(duration: 0.3)) {
                 self?.banner = nil
@@ -708,12 +748,48 @@ final class AppStore {
         tavernState = state
         tavernStatus = state.status
         tavernVariablesJSON = varsJSON
+        syncGenerationError(from: state.status, notifyIfNew: false)
         if let char = state.character,
            let idx = tavernCharacters.firstIndex(where: { $0.id == char.id }) {
             tavernCharacters[idx] = char
         }
         if persist {
             persistTavernConversation(from: state, variablesJSON: varsJSON)
+        }
+    }
+
+    private func syncGenerationError(from status: TavernStatus?, notifyIfNew: Bool) {
+        guard let status else { return }
+        if let err = status.lastGenerationError {
+            tavernGenerationError = err
+            if notifyIfNew && err.id != lastNotifiedTavernErrorId {
+                lastNotifiedTavernErrorId = err.id
+                Haptics.error()
+                showBanner(err.message, isError: true, tavernCharacterId: err.characterId)
+                let charLabel = err.characterName ?? "角色"
+                NotificationManager.shared.notifyError(
+                    title: "酒馆 · \(charLabel) \(err.badgeTitle)",
+                    body: err.message,
+                    identifier: "tavern-err-\(err.id)"
+                )
+            }
+        } else {
+            tavernGenerationError = nil
+        }
+    }
+
+    func clearTavernGenerationError() async {
+        withAnimation(.easeOut(duration: 0.2)) {
+            tavernGenerationError = nil
+        }
+        tavernStatus?.lastGenerationError = nil
+        tavernState?.status.lastGenerationError = nil
+        guard let api else { return }
+        if let res = try? await api.tavernClearError() {
+            tavernStatus = res.status
+            if tavernState != nil {
+                tavernState?.status = res.status
+            }
         }
     }
 
@@ -833,6 +909,7 @@ final class AppStore {
         do {
             let statusRes = try await api.tavernStatus()
             tavernStatus = statusRes.status
+            syncGenerationError(from: statusRes.status, notifyIfNew: false)
             if let users = statusRes.loginUsers {
                 tavernLoginUsers = users
             }
@@ -840,6 +917,7 @@ final class AppStore {
             if statusRes.status.enabled && statusRes.status.ready && !statusRes.status.needsLogin {
                 let charsRes = try await api.tavernCharacters()
                 tavernStatus = charsRes.status
+                syncGenerationError(from: charsRes.status, notifyIfNew: false)
                 withAnimation(.easeOut(duration: 0.22)) {
                     tavernCharacters = charsRes.characters
                 }
@@ -937,7 +1015,9 @@ final class AppStore {
         forceFull: Bool = false
     ) async {
         guard let api else { return }
-        tavernGenerationError = nil
+        if createNew || forceFull || (tavernGenerationError?.characterId != nil && tavernGenerationError?.characterId != id) {
+            tavernGenerationError = nil
+        }
 
         var cached: CachedTavernConversation? = nil
         if !createNew && !forceFull {
@@ -1569,6 +1649,9 @@ final class AppStore {
             if quotas != nil {
                 Task { await self.loadQuotas(refresh: true) }
             }
+            if !isTavernGenerating && !sessions.contains(where: \.isRunning) {
+                endBackgroundTaskIfNeeded()
+            }
 
         case "turn_error":
             guard let p = decodePayload(WSTurnErrorPayload.self, from: data) else { return }
@@ -1582,8 +1665,20 @@ final class AppStore {
             if let s = p.session { upsertSession(s) }
             setRunning(sid, false)
             if activeSessionId == sid { Haptics.error() }
+            if let err = p.error?.trimmingCharacters(in: .whitespacesAndNewlines), !err.isEmpty {
+                let title = session(sid)?.title ?? "会话"
+                showBanner("Agent 出错：\(err)", isError: true, sessionId: sid)
+                NotificationManager.shared.notifyError(
+                    title: "Agent · \(title) 出错",
+                    body: err,
+                    identifier: "agent-err-\(p.messageId)"
+                )
+            }
             if messages[sid] != nil {
                 Task { await self.reloadMessages(sid) }
+            }
+            if !isTavernGenerating && !sessions.contains(where: \.isRunning) {
+                endBackgroundTaskIfNeeded()
             }
 
         case "swarm_created":
@@ -1627,6 +1722,7 @@ final class AppStore {
         case "tavern_status":
             if let st = decodePayload(WSTavernStatusPayload.self, from: data)?.status {
                 tavernStatus = st
+                syncGenerationError(from: st, notifyIfNew: true)
                 if var current = tavernState {
                     current.status = st
                     if !st.isGenerating {
@@ -1687,6 +1783,10 @@ final class AppStore {
             guard let p = decodePayload(WSTavernMessageFinalizedPayload.self, from: data) else { return }
             let stillGenerating = p.isGenerating ?? false
             tavernStatus?.isGenerating = stillGenerating
+            if !stillGenerating && p.message?.isUser != true {
+                tavernGenerationError = nil
+                tavernStatus?.lastGenerationError = nil
+            }
             if var state = tavernState {
                 let matchesChar = p.characterId == nil || state.character?.id == p.characterId
                 if matchesChar {
@@ -1694,6 +1794,7 @@ final class AppStore {
                     if let msg = p.message {
                         if !msg.isUser {
                             tavernGenerationError = nil
+                            state.status.lastGenerationError = nil
                         }
                         if let idx = state.messages.lastIndex(where: { $0.mesId == msg.mesId }) {
                             state.messages[idx] = msg
@@ -1712,22 +1813,38 @@ final class AppStore {
                     }
                 }
             }
+            if !isTavernGenerating && !sessions.contains(where: \.isRunning) {
+                endBackgroundTaskIfNeeded()
+            }
 
         case "tavern_error":
             guard let p = decodePayload(WSTavernErrorPayload.self, from: data),
                   !p.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            let err = p.toGenerationError()
             tavernStatus?.isGenerating = false
+            tavernStatus?.lastGenerationError = err
             if var state = tavernState {
                 state.status.isGenerating = false
+                state.status.lastGenerationError = err
                 for idx in state.messages.indices where state.messages[idx].isStreaming {
                     state.messages[idx].isStreaming = false
                 }
                 tavernState = state
             }
-            if p.characterId == nil || activeTavernCharacterId == nil || p.characterId == activeTavernCharacterId {
-                tavernGenerationError = p.message
+            tavernGenerationError = err
+            if err.id != lastNotifiedTavernErrorId {
+                lastNotifiedTavernErrorId = err.id
                 Haptics.error()
-                showBanner(p.message, isError: true)
+                showBanner(err.message, isError: true, tavernCharacterId: err.characterId)
+                let charLabel = err.characterName ?? tavernState?.character?.name ?? "角色"
+                NotificationManager.shared.notifyError(
+                    title: "酒馆 · \(charLabel) \(err.badgeTitle)",
+                    body: err.message,
+                    identifier: "tavern-err-\(err.id)"
+                )
+            }
+            if !isTavernGenerating && !sessions.contains(where: \.isRunning) {
+                endBackgroundTaskIfNeeded()
             }
 
         case "tavern_chat_updated":

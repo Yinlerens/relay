@@ -103,6 +103,17 @@ struct SessionListView: View {
             store.homeSection = .agent
             openSession(targetId)
         }
+        .onChange(of: store.pendingOpenTavernCharacterId) { _, targetCharId in
+            guard let targetCharId else { return }
+            store.pendingOpenTavernCharacterId = nil
+            store.homeSection = .tavern
+            if tavernPath.isEmpty {
+                openTavern(characterId: targetCharId)
+            } else if store.activeTavernCharacterId != targetCharId {
+                tavernPath = NavigationPath()
+                openTavern(characterId: targetCharId)
+            }
+        }
         .onChange(of: agentPath.count) { _, newCount in
             if newCount < sessionTrail.count {
                 sessionTrail = Array(sessionTrail.prefix(newCount))
