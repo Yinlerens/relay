@@ -12,7 +12,7 @@ struct ChatView: View {
     @State private var showQuota = false
     @State private var showSwarm = false
     @State private var isAtBottom = true
-    @State private var userInteractedWithScroll = false
+    @State private var visibleMessageLimit = 60
     @State private var lightbox: Attachment?
     @State private var previewFileURL: URL? = nil
     @State private var loadingFileId: String? = nil
@@ -34,12 +34,14 @@ struct ChatView: View {
         let style = store.style(for: session?.agentId ?? "")
         let agentName = session.flatMap { store.agent(for: $0.agentId)?.name } ?? session?.agentId ?? "Agent"
         let messages = store.messages(for: sessionId)
+        let hiddenCount = max(0, messages.count - visibleMessageLimit)
+        let visibleMessages = hiddenCount > 0 ? Array(messages.suffix(visibleMessageLimit)) : messages
         let isLoading = store.loadingSessions.contains(sessionId) && messages.isEmpty
         let isRunning = session?.isRunning ?? false
 
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 26) {
+                VStack(alignment: .leading, spacing: 26) {
                     if isLoading {
                         HStack {
                             Spacer()
@@ -55,8 +57,27 @@ struct ChatView: View {
                         .padding(.top, 40)
                     }
 
-                    ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
-                        let prevUser = message.role == .assistant ? precedingUserMessage(before: index, in: messages) : nil
+                    if hiddenCount > 0 {
+                        HStack {
+                            Spacer()
+                            Button {
+                                Haptics.selection()
+                                visibleMessageLimit += 60
+                            } label: {
+                                Label("显示更早的 \(hiddenCount) 条消息", systemImage: "arrow.up.circle")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(Palette.textSecondary)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 8)
+                                    .background(Capsule().fill(Palette.fieldFill))
+                            }
+                            .buttonStyle(.pressable)
+                            Spacer()
+                        }
+                    }
+
+                    ForEach(Array(visibleMessages.enumerated()), id: \.element.id) { index, message in
+                        let prevUser = message.role == .assistant ? precedingUserMessage(before: hiddenCount + index, in: messages) : nil
                         MessageRow(
                             message: message,
                             style: style,
@@ -86,10 +107,6 @@ struct ChatView: View {
                         )
                         .equatable()
                         .id(message.id)
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .bottom).combined(with: .opacity),
-                            removal: .opacity
-                        ))
                     }
 
                     Color.clear
@@ -101,17 +118,13 @@ struct ChatView: View {
                 .padding(.bottom, 8)
                 .frame(maxWidth: 780)
                 .frame(maxWidth: .infinity)
-                .scrollTargetLayout()
             }
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
             .scrollEdgeEffectStyle(.soft, for: .all)
             .scrollDismissesKeyboard(.interactively)
-            .onScrollPhaseChange { _, phase in
-                if phase == .interacting {
-                    userInteractedWithScroll = true
-                }
-            }
             .onScrollGeometryChange(for: Bool.self) { geo in
-                geo.visibleRect.maxY >= geo.contentSize.height - 90
+                geo.contentSize.height <= geo.containerSize.height + 1
+                    || geo.visibleRect.maxY >= geo.contentSize.height - 90
             } action: { _, atBottom in
                 if atBottom != isAtBottom {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
@@ -119,37 +132,11 @@ struct ChatView: View {
                     }
                 }
             }
-            .onAppear {
-                userInteractedWithScroll = false
-                isAtBottom = true
-                if !messages.isEmpty {
-                    if let lastId = messages.last?.id {
-                        proxy.scrollTo(lastId, anchor: .bottom)
-                    }
-                    proxy.scrollTo(bottomID, anchor: .bottom)
-                }
-            }
-            .task(id: sessionId) {
-                for delayMs in [0, 120] {
-                    if delayMs > 0 {
-                        try? await Task.sleep(for: .milliseconds(delayMs))
-                    } else {
-                        await Task.yield()
-                    }
-                    guard !Task.isCancelled, !userInteractedWithScroll, isAtBottom, !messages.isEmpty else {
-                        return
-                    }
-                    if let lastId = messages.last?.id {
-                        proxy.scrollTo(lastId, anchor: .bottom)
-                    }
-                    proxy.scrollTo(bottomID, anchor: .bottom)
-                }
-            }
             .onChange(of: messages.count) { oldCount, newCount in
                 guard newCount > oldCount else { return }
                 if oldCount == 0 {
                     proxy.scrollTo(bottomID, anchor: .bottom)
-                } else {
+                } else if isAtBottom || messages.last?.role == .user {
                     withAnimation(.spring(response: 0.45, dampingFraction: 0.9)) {
                         proxy.scrollTo(bottomID, anchor: .bottom)
                     }
@@ -283,6 +270,8 @@ struct ChatView: View {
             }
         }
         .task(id: sessionId) {
+            visibleMessageLimit = 60
+            isAtBottom = true
             store.activeSessionId = sessionId
             await store.loadSession(sessionId)
         }

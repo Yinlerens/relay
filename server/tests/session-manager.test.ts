@@ -29,14 +29,69 @@ function send(obj) {
 rl.on("line", (line) => {
   if (!line.trim()) return;
   const msg = JSON.parse(line);
-  trace({ method: msg.method, id: msg.id ?? null });
+  trace({ method: msg.method, id: msg.id ?? null, modelId: msg.params?.modelId ?? null });
 
   if (msg.method === "initialize") {
     send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
     return;
   }
 
+  if (msg.method === "session/set_model") {
+    send({
+      jsonrpc: "2.0",
+      id: msg.id,
+      result: {
+        configOptions:
+          scenario === "codebuddy_model_quirk"
+            ? [
+                {
+                  id: "model",
+                  name: "Model",
+                  type: "select",
+                  currentValue: msg.params?.modelId || "hy4std",
+                  options: [
+                    { value: "hy4std", name: "Hy4" },
+                    { value: "hy4flash-free", name: "Hy4 flash" },
+                  ],
+                },
+              ]
+            : [],
+      },
+    });
+    return;
+  }
+
   if (msg.method === "session/new") {
+    if (scenario === "codebuddy_model_quirk") {
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: {
+          sessionId: "cb-acp-sess",
+          models: {
+            currentModelId: "hy4std",
+            availableModels: [
+              { modelId: "hy4std", name: "Hy4", description: "x0.29 credits" },
+              { modelId: "hy4flash-free", name: "Hy4 flash", description: "x0.00 credits" },
+            ],
+          },
+          modes: { currentModeId: "bypassPermissions", availableModes: [{ id: "bypassPermissions", name: "Bypass" }] },
+          configOptions: [
+            {
+              id: "model",
+              name: "Model",
+              type: "select",
+              currentValue: "hy4std",
+              options: [
+                { value: "hy4std", name: "Hy4" },
+                { value: "hy4flash-free", name: "Hy4 flash" },
+              ],
+            },
+          ],
+        },
+      });
+      return;
+    }
     send({
       jsonrpc: "2.0",
       id: msg.id,
@@ -52,6 +107,36 @@ rl.on("line", (line) => {
 
   if (msg.method === "session/load") {
     const sid = msg.params?.sessionId || "mock-sess-reload";
+    if (scenario === "codebuddy_model_quirk") {
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: {
+          sessionId: sid,
+          models: {
+            currentModelId: "hy4std",
+            availableModels: [
+              { modelId: "hy4std", name: "Hy4", description: "x0.29 credits" },
+              { modelId: "hy4flash-free", name: "Hy4 flash", description: "x0.00 credits" },
+            ],
+          },
+          modes: { currentModeId: "bypassPermissions", availableModes: [{ id: "bypassPermissions", name: "Bypass" }] },
+          configOptions: [
+            {
+              id: "model",
+              name: "Model",
+              type: "select",
+              currentValue: "hy4std",
+              options: [
+                { value: "hy4std", name: "Hy4" },
+                { value: "hy4flash-free", name: "Hy4 flash" },
+              ],
+            },
+          ],
+        },
+      });
+      return;
+    }
     if (scenario === "cancel_during_load") {
       setTimeout(() => {
         send({
@@ -661,5 +746,87 @@ describe("Session pinning & upload cleanup", () => {
     assert.equal(fs.existsSync(fileStrayAged), false);
     assert.ok(db.getUpload("u-fresh-orphan"));
     assert.equal(fs.existsSync(fileFreshOrphan), true);
+  });
+
+  it("defaults codebuddy sessions to hy4flash-free and explicitly re-applies selected model after session/load", async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-codebuddy-model-"));
+    const config = makeTestConfig(tmpDir);
+    const traceFile = path.join(tmpDir, "trace.jsonl");
+    const scriptPath = path.join(tmpDir, "mock-cb.cjs");
+    fs.writeFileSync(scriptPath, mockSessionAgentScript, "utf8");
+
+    db = new RelayDatabase(config.dbPath);
+    const agent: AgentProfile = {
+      id: "codebuddy",
+      name: "CodeBuddy",
+      subtitle: "Mock",
+      icon: "cpu",
+      accent: "emerald",
+      command: process.execPath,
+      args: [scriptPath],
+      env: {
+        MOCK_SCENARIO: "codebuddy_model_quirk",
+        MOCK_TRACE_FILE: traceFile,
+      },
+    };
+    const manager = new SessionManager(config, db, [agent]);
+
+    try {
+      // 1) createSession defaults CodeBuddy to hy4flash-free despite ACP reporting hy4std
+      const created = await manager.createSession({ agentId: "codebuddy", title: "Free default" });
+      assert.equal(created.currentModelId, "hy4flash-free");
+      assert.equal(created.configOptions.find((c) => c.id === "model")?.currentValue, "hy4flash-free");
+
+      const firstTrace = fs
+        .readFileSync(traceFile, "utf8")
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l) as { method: string; modelId: string | null });
+      assert.ok(
+        firstTrace.some((e) => e.method === "session/set_model" && e.modelId === "hy4flash-free"),
+        "expected session/set_model(hy4flash-free) during createSession"
+      );
+
+      // 2) Switch to hy4std, dispose worker, then prompt -> session/load MUST force set_model(hy4std)
+      const switched = await manager.updateSessionConfig(created.id, {
+        kind: "model",
+        value: "hy4std",
+      });
+      assert.equal(switched.currentModelId, "hy4std");
+      assert.equal(switched.configOptions.find((c) => c.id === "model")?.currentValue, "hy4std");
+
+      await manager.disposeSessionWorker(created.id);
+      fs.writeFileSync(traceFile, "", "utf8");
+
+      const donePromise = waitForEvent(
+        manager,
+        created.id,
+        (ev) => ev.type === "turn_completed"
+      );
+      await manager.startPrompt(created.id, { text: "continue on hy4std" });
+      await donePromise;
+
+      const afterSession = db.getSession(created.id)!;
+      assert.equal(afterSession.currentModelId, "hy4std");
+      assert.equal(afterSession.configOptions.find((c) => c.id === "model")?.currentValue, "hy4std");
+
+      const reloadTrace = fs
+        .readFileSync(traceFile, "utf8")
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l) as { method: string; modelId: string | null });
+      const loadIdx = reloadTrace.findIndex((e) => e.method === "session/load");
+      const setIdx = reloadTrace.findIndex(
+        (e) => e.method === "session/set_model" && e.modelId === "hy4std"
+      );
+      const promptIdx = reloadTrace.findIndex((e) => e.method === "session/prompt");
+      assert.ok(loadIdx >= 0 && setIdx > loadIdx && promptIdx > setIdx, `unexpected trace: ${JSON.stringify(reloadTrace)}`);
+
+      // 3) probeAgentModels returns hy4flash-free as defaultModelId even when a DB session switched to hy4std
+      const probed = await manager.probeAgentModels("codebuddy");
+      assert.equal(probed.defaultModelId, "hy4flash-free");
+    } finally {
+      await manager.disposeAll();
+    }
   });
 });

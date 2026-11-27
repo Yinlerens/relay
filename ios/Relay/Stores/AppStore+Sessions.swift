@@ -40,9 +40,13 @@ extension AppStore {
         do {
             let detail = try await api.session(id: id)
             flushDeltas()
-            upsertSession(detail.session)
+            if session(detail.session.id) != detail.session {
+                upsertSession(detail.session)
+            }
             let sorted = detail.messages.sorted { $0.createdAt < $1.createdAt }
-            messages[id] = sorted
+            if messages[id] != sorted {
+                messages[id] = sorted
+            }
             let snapshot = CachedAgentSession(
                 session: detail.session,
                 messages: sorted,

@@ -90,6 +90,42 @@ export function roundCredits(value: number): number {
   return Math.round(value * 10_000) / 10_000;
 }
 
+export function resolvePreferredDefaultModelId(
+  agent: Pick<AgentProfile, "id" | "defaultModelId">,
+  availableModels: AcpModelInfo[],
+  reportedModelId: string | null
+): string | null {
+  const configured = agent.defaultModelId?.trim();
+  if (configured && availableModels.some((m) => m.modelId === configured)) {
+    return configured;
+  }
+  if (agent.id === "codebuddy") {
+    const exactFree = availableModels.find((m) => m.modelId === "hy4flash-free");
+    if (exactFree) return exactFree.modelId;
+    const anyFree = availableModels.find(
+      (m) =>
+        m.modelId.toLowerCase().endsWith("-free") ||
+        Boolean(m.description?.toLowerCase().includes("x0.00"))
+    );
+    if (anyFree) return anyFree.modelId;
+  }
+  return reportedModelId ?? availableModels[0]?.modelId ?? null;
+}
+
+function syncModelConfigOption(
+  configOptions: AcpConfigOption[],
+  modelId: string | null
+): AcpConfigOption[] {
+  if (!modelId || configOptions.length === 0) return configOptions;
+  let changed = false;
+  const next = configOptions.map((opt) => {
+    if (opt.id !== "model" || opt.currentValue === modelId) return opt;
+    changed = true;
+    return { ...opt, currentValue: modelId };
+  });
+  return changed ? next : configOptions;
+}
+
 /** Accumulate per-call CodeBuddy usage metadata onto an active turn with deduplication. */
 export function accumulateUsageFromMeta(
   usage: UsageStats | null,
@@ -398,15 +434,20 @@ export class SessionManager {
 
     const fromDb = this.db.getLatestAgentModels(agent.id);
     if (fromDb && fromDb.models.length > 0) {
+      const defaultModelId = resolvePreferredDefaultModelId(
+        agent,
+        fromDb.models,
+        fromDb.defaultModelId
+      );
       this.modelProbeCache.set(agent.id, {
         models: fromDb.models,
-        defaultModelId: fromDb.defaultModelId,
+        defaultModelId,
         fetchedAt: now,
       });
       return {
         agentId: agent.id,
         models: fromDb.models,
-        defaultModelId: fromDb.defaultModelId,
+        defaultModelId,
       };
     }
 
@@ -425,8 +466,11 @@ export class SessionManager {
       await client.initialize();
       const res = await client.newSession(this.config.defaultCwd);
       const extracted = extractModels(res.models);
-      const defaultModelId =
-        extracted.currentModelId ?? extracted.availableModels[0]?.modelId ?? null;
+      const defaultModelId = resolvePreferredDefaultModelId(
+        agent,
+        extracted.availableModels,
+        extracted.currentModelId
+      );
       this.modelProbeCache.set(agent.id, {
         models: extracted.availableModels,
         defaultModelId,
@@ -470,7 +514,8 @@ export class SessionManager {
 
   private applySessionInitMetadata(
     sessionId: string,
-    result: Record<string, unknown>
+    result: Record<string, unknown>,
+    opts?: { preserveExistingModel?: boolean }
   ): void {
     const models = extractModels(result.models);
     const modes = extractModes(result.modes);
@@ -478,13 +523,16 @@ export class SessionManager {
 
     const modeFromConfig = configOptions.find((c) => c.id === "mode")?.currentValue;
     const modelFromConfig = configOptions.find((c) => c.id === "model")?.currentValue;
+    const existing = opts?.preserveExistingModel ? this.db.getSession(sessionId) : null;
 
     const patch: Parameters<RelayDatabase["updateSession"]>[1] = {};
     if (models.availableModels.length > 0) patch.availableModels = models.availableModels;
-    if (models.currentModelId) {
-      patch.currentModelId = models.currentModelId;
-    } else if (typeof modelFromConfig === "string" && modelFromConfig) {
-      patch.currentModelId = modelFromConfig;
+    if (!(opts?.preserveExistingModel && existing?.currentModelId)) {
+      if (models.currentModelId) {
+        patch.currentModelId = models.currentModelId;
+      } else if (typeof modelFromConfig === "string" && modelFromConfig) {
+        patch.currentModelId = modelFromConfig;
+      }
     }
 
     if (modes.availableModes.length > 0) patch.availableModes = modes.availableModes;
@@ -494,7 +542,10 @@ export class SessionManager {
       patch.currentModeId = modeFromConfig;
     }
 
-    if (configOptions.length > 0) patch.configOptions = configOptions;
+    const effectiveModelId = existing?.currentModelId ?? patch.currentModelId ?? null;
+    if (configOptions.length > 0) {
+      patch.configOptions = syncModelConfigOption(configOptions, effectiveModelId);
+    }
     this.db.updateSession(sessionId, patch);
   }
 
@@ -508,6 +559,7 @@ export class SessionManager {
     const agent = this.findAgent(session.agentId);
     const cwd = fs.existsSync(session.cwd) ? session.cwd : this.config.defaultCwd;
     const launchOptions = this.sessionLaunchHook?.(session, agent);
+    const savedModelId = session.currentModelId;
     const client = this.spawnClient(session.id, agent, cwd);
 
     try {
@@ -536,23 +588,41 @@ export class SessionManager {
         this.db.updateSession(session.id, { acpSessionId });
       }
 
-      this.applySessionInitMetadata(session.id, initRes);
+      this.applySessionInitMetadata(session.id, initRes, {
+        preserveExistingModel: Boolean(savedModelId),
+      });
 
-      // Re-apply user's saved model when re-hydrating a fresh fallback session
-      if (createdFresh && session.currentModelId) {
-        const initModels = extractModels(initRes.models);
-        if (initModels.currentModelId !== session.currentModelId) {
-          try {
-            const setRes = await client.setModel(acpSessionId, session.currentModelId);
-            const patch: Parameters<RelayDatabase["updateSession"]>[1] = {
-              currentModelId: session.currentModelId,
-            };
-            const cfg = extractConfigOptions(setRes?.configOptions);
-            if (cfg.length > 0) patch.configOptions = cfg;
-            this.db.updateSession(session.id, patch);
-          } catch {
-            // ignore if model is no longer selectable
+      const initModels = extractModels(initRes.models);
+      const desiredModelId =
+        savedModelId ??
+        resolvePreferredDefaultModelId(
+          agent,
+          initModels.availableModels,
+          initModels.currentModelId
+        );
+
+      // Re-apply desired model on fresh fallback or resumed CodeBuddy sessions (where session/load clears runtime model).
+      if (
+        desiredModelId &&
+        (createdFresh ||
+          agent.id === "codebuddy" ||
+          initModels.currentModelId !== desiredModelId)
+      ) {
+        try {
+          const setRes = await client.setModel(acpSessionId, desiredModelId);
+          const patch: Parameters<RelayDatabase["updateSession"]>[1] = {
+            currentModelId: desiredModelId,
+            touchUpdatedAt: false,
+          };
+          const setCfg = extractConfigOptions(setRes?.configOptions);
+          const baseCfg =
+            setCfg.length > 0 ? setCfg : extractConfigOptions(initRes.configOptions);
+          if (baseCfg.length > 0) {
+            patch.configOptions = syncModelConfigOption(baseCfg, desiredModelId);
           }
+          this.db.updateSession(session.id, patch);
+        } catch {
+          // ignore if model is no longer selectable
         }
       }
 
@@ -603,24 +673,28 @@ export class SessionManager {
       const models = extractModels(res.models);
       const modes = extractModes(res.modes);
       let configOptions = extractConfigOptions(res.configOptions);
+      const requestedModelId = input.initialModelId?.trim() || null;
+      const targetModelId =
+        requestedModelId ??
+        resolvePreferredDefaultModelId(agent, models.availableModels, models.currentModelId);
       let currentModelId = models.currentModelId;
 
       if (
-        input.initialModelId &&
-        input.initialModelId.trim() &&
-        input.initialModelId !== currentModelId
+        targetModelId &&
+        (targetModelId !== currentModelId || agent.id === "codebuddy")
       ) {
         try {
-          const setRes = await client.setModel(acpSessionId, input.initialModelId.trim());
-          currentModelId = input.initialModelId.trim();
+          const setRes = await client.setModel(acpSessionId, targetModelId);
+          currentModelId = targetModelId;
           const updatedCfg = extractConfigOptions(setRes?.configOptions);
           if (updatedCfg.length > 0) {
             configOptions = updatedCfg;
           }
         } catch {
-          // Keep agent default model if initialModelId is rejected
+          // Keep agent default model if targetModelId is rejected
         }
       }
+      configOptions = syncModelConfigOption(configOptions, currentModelId);
 
       const created = this.db.createSession({
         id,
@@ -722,7 +796,11 @@ export class SessionManager {
         currentModelId: input.value,
       };
       const cfg = extractConfigOptions(res.configOptions);
-      if (cfg.length > 0) patch.configOptions = cfg;
+      if (cfg.length > 0) {
+        patch.configOptions = syncModelConfigOption(cfg, input.value);
+      } else if (session.configOptions.length > 0) {
+        patch.configOptions = syncModelConfigOption(session.configOptions, input.value);
+      }
       this.db.updateSession(sessionId, patch);
     } else if (input.kind === "mode") {
       if (typeof input.value !== "string") throw new Error("Mode ID must be a string");
@@ -742,17 +820,30 @@ export class SessionManager {
       );
       const cfg = extractConfigOptions(res.configOptions);
       if (cfg.length > 0) {
-        const patch: Parameters<RelayDatabase["updateSession"]>[1] = { configOptions: cfg };
-        const modeOpt = cfg.find((c) => c.id === "mode");
+        const syncedCfg =
+          input.configId === "model" && typeof input.value === "string"
+            ? syncModelConfigOption(cfg, input.value)
+            : cfg;
+        const patch: Parameters<RelayDatabase["updateSession"]>[1] = { configOptions: syncedCfg };
+        const modeOpt = syncedCfg.find((c) => c.id === "mode");
         if (modeOpt && typeof modeOpt.currentValue === "string") {
           patch.currentModeId = modeOpt.currentValue;
+        }
+        if (input.configId === "model" && typeof input.value === "string") {
+          patch.currentModelId = input.value;
         }
         this.db.updateSession(sessionId, patch);
       } else {
         const updatedOpts = session.configOptions.map((opt) =>
           opt.id === input.configId ? { ...opt, currentValue: input.value } : opt
         );
-        this.db.updateSession(sessionId, { configOptions: updatedOpts });
+        const patch: Parameters<RelayDatabase["updateSession"]>[1] = {
+          configOptions: updatedOpts,
+        };
+        if (input.configId === "model" && typeof input.value === "string") {
+          patch.currentModelId = input.value;
+        }
+        this.db.updateSession(sessionId, patch);
       }
     }
 
@@ -1203,14 +1294,16 @@ export class SessionManager {
       case "config_option_update": {
         const cfg = extractConfigOptions(update.configOptions);
         if (cfg.length > 0) {
-          const patch: Parameters<RelayDatabase["updateSession"]>[1] = { configOptions: cfg };
+          const current = this.db.getSession(sessionId);
+          const patch: Parameters<RelayDatabase["updateSession"]>[1] = {
+            configOptions: syncModelConfigOption(cfg, current?.currentModelId ?? null),
+          };
           const modeOpt = cfg.find((c) => c.id === "mode");
           if (modeOpt && typeof modeOpt.currentValue === "string") {
             patch.currentModeId = modeOpt.currentValue;
           }
           const modelOpt = cfg.find((c) => c.id === "model");
           if (modelOpt && typeof modelOpt.currentValue === "string") {
-            const current = this.db.getSession(sessionId);
             if (!current?.currentModelId) {
               patch.currentModelId = modelOpt.currentValue;
             }

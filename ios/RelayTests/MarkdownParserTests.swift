@@ -89,4 +89,41 @@ final class MarkdownParserTests: XCTestCase {
             return XCTFail("Expected single paragraph, got \(nodes)")
         }
     }
+
+    func testMermaidTopologyBlockParsingAndBundleResource() {
+        let md = """
+        ### 一、全景架构拓扑
+
+        ```mermaid
+        flowchart TB
+            subgraph Clients["终端与外部调用方"]
+                IOS["Relay 原生 iOS App (SwiftUI / SideStore)"]
+            end
+            subgraph Apps["业务应用层 (127.0.0.1 内网回环)"]
+                RELAY["Relay Control Plane (:18660)"]
+            end
+            IOS -->|"code.apps.makima.sbs (HTTPS/WSS)"| RELAY
+        ```
+        """
+        let nodes = MarkdownParser.parse(md)
+        XCTAssertEqual(nodes.count, 2)
+        guard case .heading(3, "一、全景架构拓扑") = nodes[0].block else {
+            return XCTFail("Expected heading, got \(nodes)")
+        }
+        guard case .code(let lang, let body, let closed) = nodes[1].block else {
+            return XCTFail("Expected mermaid code block, got \(nodes)")
+        }
+        XCTAssertEqual(lang, "mermaid")
+        XCTAssertTrue(closed)
+        XCTAssertTrue(body.contains("flowchart TB"))
+        XCTAssertTrue(body.contains("subgraph Clients"))
+        XCTAssertTrue(MarkdownParser.isMermaidLanguage(lang))
+        XCTAssertTrue(MarkdownParser.isMermaidLanguage("MERMAID"))
+        XCTAssertTrue(MarkdownParser.isMermaidLanguage("mmd"))
+        XCTAssertFalse(MarkdownParser.isMermaidLanguage("swift"))
+        let mermaidBundleURL =
+            Bundle.main.url(forResource: "mermaid.min", withExtension: "js")
+            ?? Bundle(for: MermaidAssetSchemeHandler.self).url(forResource: "mermaid.min", withExtension: "js")
+        XCTAssertNotNil(mermaidBundleURL)
+    }
 }

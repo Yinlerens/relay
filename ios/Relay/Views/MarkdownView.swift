@@ -202,6 +202,11 @@ enum MarkdownParser {
         info.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
     }
 
+    static func isMermaidLanguage(_ language: String) -> Bool {
+        let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized == "mermaid" || normalized == "mmd"
+    }
+
     private static func splitInlineTrailingFence(_ line: String) -> (before: String, fenceLine: String)? {
         guard let firstRange = line.range(of: "```") else { return nil }
         if line[firstRange.upperBound...].range(of: "```") != nil {
@@ -372,7 +377,14 @@ struct MarkdownView: View {
             .padding(.vertical, 2)
 
         case .code(let language, let code, let closed):
-            CodeBlockCard(language: language, code: code, isStreaming: isStreaming && isLast && !closed)
+            let isBlockStreaming = isStreaming && isLast && !closed
+            if MarkdownParser.isMermaidLanguage(language),
+               !isBlockStreaming,
+               !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                MermaidDiagramCard(code: code, tint: style.tint)
+            } else {
+                CodeBlockCard(language: language, code: code, isStreaming: isBlockStreaming)
+            }
 
         case .table(let rows):
             TableBlock(rows: rows, tint: style.tint)

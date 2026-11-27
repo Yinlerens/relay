@@ -503,7 +503,7 @@ describe("Relay Swarm Backend", () => {
     const modelsRes = await api("/api/agents/codebuddy/models");
     assert.equal(modelsRes.status, 200);
     assert.equal(modelsRes.json.agentId, "codebuddy");
-    assert.equal(modelsRes.json.defaultModelId, "deepseek-v4.1-flash");
+    assert.equal(modelsRes.json.defaultModelId, "hy4flash-free");
     assert.equal(modelsRes.json.models.length, 2);
 
     const unknownAgentRes = await api("/api/agents/does-not-exist/models");

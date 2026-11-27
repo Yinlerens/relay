@@ -11,6 +11,7 @@ export interface AgentProfile {
   command: string;
   args: string[];
   env?: Record<string, string>;
+  defaultModelId?: string;
 }
 
 export interface AppConfig {
